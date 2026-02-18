@@ -502,6 +502,8 @@ local function OnEvent()
     end
 end
 
--- Register events
-PhantomLockoutFrame:RegisterEvent("VARIABLES_LOADED")
-PhantomLockoutFrame:SetScript("OnEvent", OnEvent)
+-- Bootstrap: use a Lua-created frame for event registration
+-- (PhantomLockoutFrame from XML may not be globally available yet)
+local eventFrame = CreateFrame("Frame")
+eventFrame:RegisterEvent("VARIABLES_LOADED")
+eventFrame:SetScript("OnEvent", OnEvent)
