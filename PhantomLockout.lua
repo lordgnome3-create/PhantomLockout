@@ -176,39 +176,25 @@ end
 ----------------------------------------------------------------------
 
 local function GetSecondsUntilReset(raid)
+    -- Pure epoch-based modulo for ALL raid types.
+    -- Weekly anchor: Wed Jan 8, 2025 04:00 UTC = Tue Jan 7, 2025 23:00 EST
+    -- This is a known 40-man weekly reset point.
+    local WEEKLY_ANCHOR = 1736308800
+
+    local anchor
     if raid.cycle == CYCLE_7DAY then
-        -- Weekly reset: Tuesday 23:00 EST = Wednesday 04:00 UTC
-        -- Calculate entirely in UTC to avoid local timezone mismatches
-        local now = time()
-        local utcDay = tonumber(date("!%w", now))    -- 0=Sun,1=Mon,...6=Sat
-        local utcHour = tonumber(date("!%H", now))
-        local utcMin = tonumber(date("!%M", now))
-        local utcSec = tonumber(date("!%S", now))
-
-        -- Target: Wednesday (3) at 04:00 UTC
-        local TARGET_DAY = 3
-        local TARGET_HOUR = 4
-
-        -- Seconds into current week (from Sunday 00:00 UTC)
-        local nowInWeek = utcDay * 86400 + utcHour * 3600 + utcMin * 60 + utcSec
-        local targetInWeek = TARGET_DAY * 86400 + TARGET_HOUR * 3600
-
-        local diff = targetInWeek - nowInWeek
-        if diff <= 0 then
-            diff = diff + 7 * 86400  -- wrap to next week
-        end
-
-        return diff
+        anchor = WEEKLY_ANCHOR
     else
-        -- Rolling resets (5-day, 3-day): anchor + modulo
-        local now = time()
-        local elapsed = now - raid.anchor
-        if elapsed < 0 then
-            return raid.cycle
-        end
-        local inCycle = math.mod(elapsed, raid.cycle)
-        return raid.cycle - inCycle
+        anchor = raid.anchor
     end
+
+    local now = time()
+    local elapsed = now - anchor
+    if elapsed < 0 then
+        return raid.cycle
+    end
+    local inCycle = math.mod(elapsed, raid.cycle)
+    return raid.cycle - inCycle
 end
 
 local function FormatCountdown(seconds)
@@ -238,47 +224,68 @@ end
 
 local function GetResetDateString(seconds)
     local resetTime = time() + seconds
-    return date("!%A, %b %d at %I:%M %p", resetTime) .. " (UTC)"
+    return date("%A, %b %d at %I:%M %p", resetTime) .. " (Local)"
 end
 
 ----------------------------------------------------------------------
 -- PERSONAL LOCKOUT DETECTION
 ----------------------------------------------------------------------
 
+-- savedLockouts[lowerName] = absolute expiry time (epoch)
 local function RefreshSavedInstances()
     savedLockouts = {}
     local num = GetNumSavedInstances()
     if not num or num == 0 then return end
+    local now = time()
     for i = 1, num do
         local name, id, resetTime = GetSavedInstanceInfo(i)
         if name and resetTime and resetTime > 0 then
-            savedLockouts[string.lower(name)] = true
+            -- Store the absolute epoch when lockout expires
+            savedLockouts[string.lower(name)] = now + resetTime
         end
     end
 end
 
+-- Returns isLocked (bool), secondsRemaining (number or nil)
 local function IsPlayerLocked(raid)
-    if savedLockouts[string.lower(raid.name)] then
-        return true
+    local now = time()
+
+    local expiry = savedLockouts[string.lower(raid.name)]
+    if expiry and expiry > now then
+        return true, expiry - now
     end
-    if savedLockouts[string.lower(raid.short)] then
-        return true
+
+    expiry = savedLockouts[string.lower(raid.short)]
+    if expiry and expiry > now then
+        return true, expiry - now
     end
+
     -- Handle Karazhan variants matching just "karazhan"
     if string.find(string.lower(raid.name), "karazhan") then
-        if savedLockouts["karazhan"] then
-            return true
+        expiry = savedLockouts["karazhan"]
+        if expiry and expiry > now then
+            return true, expiry - now
         end
     end
-    return false
+    return false, nil
 end
 
 local function GetPlayerStatus(raid)
-    if IsPlayerLocked(raid) then
-        return "|cffff3333LOCKED|r", true
+    local locked, personalTime = IsPlayerLocked(raid)
+    if locked then
+        return "|cffff3333LOCKED|r", true, personalTime
     else
-        return "|cff33ff33AVAILABLE|r", false
+        return "|cff33ff33AVAILABLE|r", false, nil
     end
+end
+
+-- Get the display countdown: personal timer if locked, global timer if available
+local function GetDisplayCountdown(raid)
+    local locked, personalTime = IsPlayerLocked(raid)
+    if locked and personalTime and personalTime > 0 then
+        return personalTime
+    end
+    return GetSecondsUntilReset(raid)
 end
 
 ----------------------------------------------------------------------
@@ -424,8 +431,8 @@ local function UpdateInfoPanel()
         return
     end
     local raid = RAIDS[selectedRaid]
-    local remaining = GetSecondsUntilReset(raid)
-    local status, locked = GetPlayerStatus(raid)
+    local remaining = GetDisplayCountdown(raid)
+    local status, locked, personalTime = GetPlayerStatus(raid)
     local lockLabel
     if locked then
         lockLabel = "|cffff3333You are saved to this instance.|r"
@@ -440,12 +447,19 @@ local function UpdateInfoPanel()
         guildStr = "  |cff888888Guild locked:|r |cffffaa33" .. table.concat(guildNames, ", ") .. "|r"
     end
 
+    local timerLabel
+    if locked then
+        timerLabel = "Lockout expires in"
+    else
+        timerLabel = "Next reset in"
+    end
+
     infoText:SetText(string.format(
         "|cffffd100%s|r  |cff888888(%s-Man  |  %d bosses)|r\n" ..
-        "Next reset in: |cff44ff44%s|r  |cff888888(%s cycle)|r  -  %s\n" ..
+        "%s: |cff44ff44%s|r  |cff888888(%s cycle)|r  -  %s\n" ..
         "%s  |cff888888-|r  |cffaaaaaa%s|r%s",
         raid.name, raid.size, raid.bosses,
-        FormatCountdown(remaining), GetCycleLabel(raid.cycle), status,
+        timerLabel, FormatCountdown(remaining), GetCycleLabel(raid.cycle), status,
         lockLabel, raid.info, guildStr
     ))
 end
@@ -528,17 +542,18 @@ local function CreateRow(parent, index)
     row:SetScript("OnEnter", function()
         if not row.raidIndex then return end
         local raid = RAIDS[row.raidIndex]
-        local remaining = GetSecondsUntilReset(raid)
-        local pStatus, pLocked = GetPlayerStatus(raid)
+        local remaining = GetDisplayCountdown(raid)
+        local pStatus, pLocked, pTime = GetPlayerStatus(raid)
         GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
         GameTooltip:AddLine(raid.name, 1, 0.82, 0)
         GameTooltip:AddLine(" ")
         GameTooltip:AddDoubleLine("Players:", raid.size .. "-Man", 0.8, 0.8, 0.6, 1, 1, 1)
         GameTooltip:AddDoubleLine("Bosses:", raid.bosses, 0.8, 0.8, 0.6, 1, 1, 1)
         GameTooltip:AddDoubleLine("Reset Cycle:", GetCycleLabel(raid.cycle), 0.8, 0.8, 0.6, 1, 1, 1)
-        GameTooltip:AddDoubleLine("Resets In:", FormatCountdown(remaining), 0.8, 0.8, 0.6, 0.4, 1, 0.4)
+        GameTooltip:AddDoubleLine("Your Lockout:", FormatCountdown(remaining), 0.8, 0.8, 0.6, 0.4, 1, 0.4)
         if pLocked then
             GameTooltip:AddDoubleLine("Your Status:", "LOCKED", 0.8, 0.8, 0.6, 1, 0.2, 0.2)
+            GameTooltip:AddDoubleLine("Global Reset:", FormatCountdown(GetSecondsUntilReset(raid)), 0.8, 0.8, 0.6, 0.6, 0.6, 0.4)
         else
             GameTooltip:AddDoubleLine("Your Status:", "AVAILABLE", 0.8, 0.8, 0.6, 0.2, 1, 0.2)
         end
@@ -591,8 +606,8 @@ local function UpdateRows()
     for i = 1, numRaids do
         local row = rowFrames[i]
         local raid = RAIDS[i]
-        local remaining = GetSecondsUntilReset(raid)
-        local status, locked = GetPlayerStatus(raid)
+        local remaining = GetDisplayCountdown(raid)
+        local status, locked, personalTime = GetPlayerStatus(raid)
 
         row.raidIndex = i
         row.icon:SetTexture(raid.icon)
@@ -968,8 +983,8 @@ boot:SetScript("OnEvent", function()
                 DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Upcoming Resets:")
                 for i = 1, table.getn(RAIDS) do
                     local raid = RAIDS[i]
-                    local remaining = GetSecondsUntilReset(raid)
-                    local status, _ = GetPlayerStatus(raid)
+                    local remaining = GetDisplayCountdown(raid)
+                    local status, _, _ = GetPlayerStatus(raid)
                     DEFAULT_CHAT_FRAME:AddMessage(string.format("  |cffffd100%s|r (%s-Man): %s  -  %s",
                         raid.name, raid.size, FormatCountdown(remaining), status))
                 end
