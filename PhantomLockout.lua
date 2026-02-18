@@ -13,10 +13,16 @@ local ADDON_PREFIX = "PhantomLock"
 -- CONFIGURATION & DATA
 ----------------------------------------------------------------------
 
-local ANCHOR_RAID40 = 1736309600
-local ANCHOR_ONYXIA = 1736309600
-local ANCHOR_KARAZHAN = 1736309600
-local ANCHOR_RAID20 = 1736309600
+-- Weekly raids reset Tuesday at 23:00 server time (EST).
+-- We compute these from day-of-week + GetGameTime().
+-- Rolling resets use anchor-based modulo math.
+-- Anchors: known reset moments (UTC epoch) for rolling cycles.
+-- Onyxia 5-day anchor: Wed Jan 8, 2025 04:00 UTC (Tue Jan 7 23:00 EST)
+local ANCHOR_ONYXIA = 1736308800
+-- Karazhan 5-day anchor: offset by 2 days from Onyxia
+local ANCHOR_KARAZHAN = 1736308800 + (2 * 86400)
+-- Raid 20 / Kara10 3-day anchor: offset by 1 day from Onyxia
+local ANCHOR_RAID20 = 1736308800 + 86400
 
 local CYCLE_7DAY = 7 * 24 * 3600
 local CYCLE_5DAY = 5 * 24 * 3600
@@ -28,7 +34,7 @@ local RAIDS = {
         short = "MC",
         size = 40,
         cycle = CYCLE_7DAY,
-        anchor = ANCHOR_RAID40,
+        anchor = 0, -- weekly: computed from day-of-week
         icon = "Interface\\Icons\\Spell_Fire_Incinerate",
         info = "The Firelord Ragnaros awaits in Blackrock Mountain. Tier 1 gear and legendary bindings.",
         bosses = 10,
@@ -38,7 +44,7 @@ local RAIDS = {
         short = "BWL",
         size = 40,
         cycle = CYCLE_7DAY,
-        anchor = ANCHOR_RAID40,
+        anchor = 0, -- weekly: computed from day-of-week
         icon = "Interface\\Icons\\INV_Misc_Head_Dragon_Black",
         info = "Nefarian's stronghold atop Blackrock Mountain. Tier 2 gear and challenging encounters.",
         bosses = 8,
@@ -48,7 +54,7 @@ local RAIDS = {
         short = "AQ40",
         size = 40,
         cycle = CYCLE_7DAY,
-        anchor = ANCHOR_RAID40,
+        anchor = 0, -- weekly: computed from day-of-week
         icon = "Interface\\Icons\\INV_Misc_AhnQirajTrinket_01",
         info = "Face C'Thun and the Qiraji empire. Tier 2.5 gear.",
         bosses = 9,
@@ -58,7 +64,7 @@ local RAIDS = {
         short = "Naxx",
         size = 40,
         cycle = CYCLE_7DAY,
-        anchor = ANCHOR_RAID40,
+        anchor = 0, -- weekly: computed from day-of-week
         icon = "Interface\\Icons\\INV_Trinket_Naxxramas06",
         info = "The floating necropolis of Kel'Thuzad. Four wings. Tier 3 gear.",
         bosses = 15,
@@ -68,7 +74,7 @@ local RAIDS = {
         short = "ES",
         size = 40,
         cycle = CYCLE_7DAY,
-        anchor = ANCHOR_RAID40,
+        anchor = 0, -- weekly: computed from day-of-week
         icon = "Interface\\Icons\\INV_Misc_Gem_Emerald_02",
         info = "Turtle WoW exclusive. Venture into the Emerald Dream.",
         bosses = 4,
@@ -170,13 +176,39 @@ end
 ----------------------------------------------------------------------
 
 local function GetSecondsUntilReset(raid)
-    local now = time()
-    local elapsed = now - raid.anchor
-    if elapsed < 0 then
-        return raid.cycle + elapsed
+    if raid.cycle == CYCLE_7DAY then
+        -- Weekly reset: Tuesday at 23:00 server time
+        -- GetGameTime() gives server hours/minutes
+        local serverH, serverM = GetGameTime()
+
+        -- Get local day of week (0=Sun, 1=Mon, 2=Tue, ... 6=Sat)
+        -- On most systems this matches server day closely enough
+        local wday = tonumber(date("%w"))
+
+        -- Reset target: Tuesday (wday=2) at 23:00 server time
+        local RESET_WDAY = 2
+        local RESET_HOUR = 23
+
+        -- Convert current position and reset position to minutes-in-week
+        local nowMins = wday * 1440 + serverH * 60 + serverM
+        local resetMins = RESET_WDAY * 1440 + RESET_HOUR * 60
+
+        local diffMins = resetMins - nowMins
+        if diffMins <= 0 then
+            diffMins = diffMins + 7 * 1440  -- wrap to next week
+        end
+
+        return diffMins * 60  -- convert to seconds
+    else
+        -- Rolling resets (5-day, 3-day): anchor + modulo
+        local now = time()
+        local elapsed = now - raid.anchor
+        if elapsed < 0 then
+            return raid.cycle
+        end
+        local inCycle = math.mod(elapsed, raid.cycle)
+        return raid.cycle - inCycle
     end
-    local inCycle = math.mod(elapsed, raid.cycle)
-    return raid.cycle - inCycle
 end
 
 local function FormatCountdown(seconds)
