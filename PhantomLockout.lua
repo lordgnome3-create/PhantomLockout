@@ -1,7 +1,13 @@
 ----------------------------------------------------------------------
 -- PhantomLockout - Turtle WoW Raid Lockout Tracker
--- Pure Lua addon - resizable, personal lockout detection
+-- Pure Lua - guild lockout sharing via addon messages
 ----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+-- ADDON MESSAGE PREFIX
+----------------------------------------------------------------------
+
+local ADDON_PREFIX = "PhantomLock"
 
 ----------------------------------------------------------------------
 -- CONFIGURATION & DATA
@@ -79,12 +85,22 @@ local RAIDS = {
     },
     {
         name = "Karazhan",
-        short = "Kara",
+        short = "Kara40",
         size = 40,
         cycle = CYCLE_5DAY,
         anchor = ANCHOR_KARAZHAN,
-        icon = "Interface\\Icons\\INV_Jewelry_Ring_54",
-        info = "Medivh's haunted tower in Deadwind Pass. Turtle WoW adapted. 5-day reset.",
+        icon = "Interface\\Icons\\INV_Misc_Bone_HumanSkull_01",
+        info = "Medivh's haunted tower (40-man). Deadwind Pass. 5-day reset.",
+        bosses = 11,
+    },
+    {
+        name = "Karazhan (10)",
+        short = "Kara10",
+        size = 10,
+        cycle = CYCLE_3DAY,
+        anchor = ANCHOR_RAID20,
+        icon = "Interface\\Icons\\Spell_Shadow_RaiseDead",
+        info = "Medivh's haunted tower (10-man). Deadwind Pass. 3-day reset.",
         bosses = 11,
     },
     {
@@ -114,14 +130,14 @@ local RAIDS = {
 ----------------------------------------------------------------------
 
 local ROW_HEIGHT = 28
-local HEADER_TOP = 78       -- pixels from frame top where rows start
-local INFO_HEIGHT = 55      -- info panel height
-local INFO_BOTTOM = 15      -- info panel margin from bottom
-local RESET_BTN_BOTTOM = 75 -- reset button margin from bottom
-local MIN_WIDTH = 550
+local HEADER_TOP = 78
+local INFO_HEIGHT = 55
+local INFO_BOTTOM = 15
+local RESET_BTN_BOTTOM = 75
+local MIN_WIDTH = 680
 local MIN_HEIGHT = 300
-local DEFAULT_WIDTH = 600
-local DEFAULT_HEIGHT = 440
+local DEFAULT_WIDTH = 740
+local DEFAULT_HEIGHT = 470
 
 local selectedRaid = nil
 local rowFrames = {}
@@ -134,7 +150,20 @@ local sepLine = nil
 local hdrFrame = nil
 
 -- Personal lockout tracking
-local savedLockouts = {}  -- keyed by raid name lowercase -> true if locked
+local savedLockouts = {}
+
+-- Guild lockout tracking: guildLockouts[raidShortLower] = { ["PlayerName"] = true, ... }
+local guildLockouts = {}
+
+-- Initialize guild lockout tables for each raid
+local function InitGuildTables()
+    for i = 1, table.getn(RAIDS) do
+        local key = string.lower(RAIDS[i].short)
+        if not guildLockouts[key] then
+            guildLockouts[key] = {}
+        end
+    end
+end
 
 ----------------------------------------------------------------------
 -- UTILITY FUNCTIONS
@@ -197,13 +226,17 @@ local function RefreshSavedInstances()
 end
 
 local function IsPlayerLocked(raid)
-    -- Check by full name
     if savedLockouts[string.lower(raid.name)] then
         return true
     end
-    -- Check by short name (some servers report abbreviated names)
     if savedLockouts[string.lower(raid.short)] then
         return true
+    end
+    -- Handle Karazhan variants matching just "karazhan"
+    if string.find(string.lower(raid.name), "karazhan") then
+        if savedLockouts["karazhan"] then
+            return true
+        end
     end
     return false
 end
@@ -217,11 +250,100 @@ local function GetPlayerStatus(raid)
 end
 
 ----------------------------------------------------------------------
+-- GUILD LOCKOUT COMMUNICATION
+----------------------------------------------------------------------
+
+-- Build a message string of our locked raids: "MC,BWL,Naxx"
+local function BuildLockoutMessage()
+    local parts = {}
+    for i = 1, table.getn(RAIDS) do
+        if IsPlayerLocked(RAIDS[i]) then
+            table.insert(parts, RAIDS[i].short)
+        end
+    end
+    if table.getn(parts) == 0 then
+        return "NONE"
+    end
+    return table.concat(parts, ",")
+end
+
+-- Broadcast our lockouts to guild
+local function BroadcastLockouts()
+    if not IsInGuild() then return end
+    local msg = "LOCKOUTS:" .. BuildLockoutMessage()
+    SendAddonMessage(ADDON_PREFIX, msg, "GUILD")
+end
+
+-- Parse incoming lockout message from a guild member
+local function ParseLockoutMessage(sender, message)
+    if not message then return end
+    if string.sub(message, 1, 9) ~= "LOCKOUTS:" then return end
+    local payload = string.sub(message, 10)
+
+    -- Clear this sender from all raids first
+    for i = 1, table.getn(RAIDS) do
+        local key = string.lower(RAIDS[i].short)
+        if guildLockouts[key] then
+            guildLockouts[key][sender] = nil
+        end
+    end
+
+    -- If they have no lockouts, we're done
+    if payload == "NONE" then return end
+
+    -- Parse comma-separated raid shorts
+    -- Manual split for vanilla Lua (no string.split)
+    local start = 1
+    while true do
+        local commaPos = string.find(payload, ",", start, true)
+        local token
+        if commaPos then
+            token = string.sub(payload, start, commaPos - 1)
+            start = commaPos + 1
+        else
+            token = string.sub(payload, start)
+        end
+        if token and token ~= "" then
+            local key = string.lower(token)
+            if guildLockouts[key] then
+                guildLockouts[key][sender] = true
+            end
+        end
+        if not commaPos then break end
+    end
+end
+
+-- Get list of guild members locked to a specific raid
+local function GetGuildLockedNames(raid)
+    local key = string.lower(raid.short)
+    local names = {}
+    if not guildLockouts[key] then return names end
+    for name, v in pairs(guildLockouts[key]) do
+        if v then
+            table.insert(names, name)
+        end
+    end
+    -- Sort alphabetically
+    table.sort(names)
+    return names
+end
+
+local function GetGuildLockedCount(raid)
+    local key = string.lower(raid.short)
+    if not guildLockouts[key] then return 0 end
+    local count = 0
+    for name, v in pairs(guildLockouts[key]) do
+        if v then count = count + 1 end
+    end
+    return count
+end
+
+----------------------------------------------------------------------
 -- LAYOUT HELPERS
 ----------------------------------------------------------------------
 
 local function GetVisibleRowCount()
-    if not mainFrame then return 9 end
+    if not mainFrame then return 10 end
     local frameH = mainFrame:GetHeight()
     local usable = frameH - HEADER_TOP - INFO_HEIGHT - INFO_BOTTOM - RESET_BTN_BOTTOM + 40
     local count = math.floor(usable / ROW_HEIGHT)
@@ -230,7 +352,7 @@ local function GetVisibleRowCount()
 end
 
 local function GetContentWidth()
-    if not mainFrame then return 555 end
+    if not mainFrame then return 695 end
     return mainFrame:GetWidth() - 45
 end
 
@@ -238,25 +360,12 @@ local function RepositionElements()
     if not mainFrame then return end
     local cw = GetContentWidth()
 
-    -- Resize separator
-    if sepLine then
-        sepLine:SetWidth(cw + 5)
-    end
-
-    -- Resize header
-    if hdrFrame then
-        hdrFrame:SetWidth(cw)
-    end
-
-    -- Resize info panel
+    if sepLine then sepLine:SetWidth(cw + 5) end
+    if hdrFrame then hdrFrame:SetWidth(cw) end
     if infoPanel then
         infoPanel:SetWidth(cw)
-        if infoText then
-            infoText:SetWidth(cw - 15)
-        end
+        if infoText then infoText:SetWidth(cw - 15) end
     end
-
-    -- Resize rows
     for i = 1, table.getn(rowFrames) do
         rowFrames[i]:SetWidth(cw)
     end
@@ -291,13 +400,21 @@ local function UpdateInfoPanel()
     else
         lockLabel = "|cff33ff33You are not saved. Good to go!|r"
     end
+
+    -- Guild lockout info
+    local guildNames = GetGuildLockedNames(raid)
+    local guildStr = ""
+    if table.getn(guildNames) > 0 then
+        guildStr = "  |cff888888Guild locked:|r |cffffaa33" .. table.concat(guildNames, ", ") .. "|r"
+    end
+
     infoText:SetText(string.format(
         "|cffffd100%s|r  |cff888888(%s-Man  |  %d bosses)|r\n" ..
-        "Next global reset in: |cff44ff44%s|r  |cff888888(%s cycle)|r  -  %s\n" ..
-        "%s  |cff888888-|r  |cffaaaaaa%s|r",
+        "Next reset in: |cff44ff44%s|r  |cff888888(%s cycle)|r  -  %s\n" ..
+        "%s  |cff888888-|r  |cffaaaaaa%s|r%s",
         raid.name, raid.size, raid.bosses,
         FormatCountdown(remaining), GetCycleLabel(raid.cycle), status,
-        lockLabel, raid.info
+        lockLabel, raid.info, guildStr
     ))
 end
 
@@ -359,15 +476,23 @@ local function CreateRow(parent, index)
 
     row.timerText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.timerText:SetPoint("LEFT", row, "LEFT", 400, 0)
-    row.timerText:SetWidth(140)
+    row.timerText:SetWidth(110)
     row.timerText:SetJustifyH("LEFT")
 
+    -- Guild Lockouts column
+    row.guildText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    row.guildText:SetPoint("LEFT", row, "LEFT", 520, 0)
+    row.guildText:SetWidth(160)
+    row.guildText:SetJustifyH("LEFT")
+
+    -- Click
     row:SetScript("OnClick", function()
         selectedRaid = row.raidIndex
         UpdateSelection()
         UpdateInfoPanel()
     end)
 
+    -- Tooltip
     row:SetScript("OnEnter", function()
         if not row.raidIndex then return end
         local raid = RAIDS[row.raidIndex]
@@ -388,6 +513,20 @@ local function CreateRow(parent, index)
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("Next Reset:", 0.6, 0.6, 0.4)
         GameTooltip:AddLine(GetResetDateString(remaining), 1, 1, 1)
+
+        -- Guild locked names in tooltip
+        local gNames = GetGuildLockedNames(raid)
+        if table.getn(gNames) > 0 then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Guild Members Locked (" .. table.getn(gNames) .. "):", 1, 0.67, 0.2)
+            for gi = 1, table.getn(gNames) do
+                GameTooltip:AddLine("  " .. gNames[gi], 1, 0.85, 0.5)
+            end
+        else
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("No guild members locked (with addon).", 0.5, 0.5, 0.5)
+        end
+
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("|cff888888Click for details|r")
         GameTooltip:Show()
@@ -411,50 +550,60 @@ local function UpdateRows()
     local visibleRows = GetVisibleRowCount()
     if visibleRows > numRaids then visibleRows = numRaids end
 
-    -- Create rows on demand
-    local totalNeeded = numRaids
-    for i = 1, totalNeeded do
+    for i = 1, numRaids do
         if not rowFrames[i] then
             rowFrames[i] = CreateRow(mainFrame, i)
         end
     end
 
-    for i = 1, totalNeeded do
+    for i = 1, numRaids do
         local row = rowFrames[i]
-        if i <= numRaids then
-            local raid = RAIDS[i]
-            local remaining = GetSecondsUntilReset(raid)
-            local status, locked = GetPlayerStatus(raid)
+        local raid = RAIDS[i]
+        local remaining = GetSecondsUntilReset(raid)
+        local status, locked = GetPlayerStatus(raid)
 
-            row.raidIndex = i
-            row.icon:SetTexture(raid.icon)
-            row.nameText:SetText(raid.name)
+        row.raidIndex = i
+        row.icon:SetTexture(raid.icon)
+        row.nameText:SetText(raid.name)
 
-            if raid.size == 40 then
-                row.sizeText:SetText("|cffff883340-Man|r")
-            else
-                row.sizeText:SetText("|cff33aaff20-Man|r")
-            end
-
-            row.cycleText:SetText(GetCycleLabel(raid.cycle))
-            row.statusText:SetText(status)
-            row.timerText:SetText("|cffffffff" .. FormatCountdown(remaining) .. "|r")
-
-            if i == selectedRaid then
-                row.selected:Show()
-            else
-                row.selected:Hide()
-            end
-
-            -- Only show rows that fit
-            if i <= visibleRows then
-                row:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 20, -HEADER_TOP - ((i - 1) * ROW_HEIGHT))
-                row:Show()
-            else
-                row:Hide()
-            end
+        if raid.size == 40 then
+            row.sizeText:SetText("|cffff883340-Man|r")
+        elseif raid.size == 20 then
+            row.sizeText:SetText("|cff33aaff20-Man|r")
         else
-            row.raidIndex = nil
+            row.sizeText:SetText("|cff88ddff" .. raid.size .. "-Man|r")
+        end
+
+        row.cycleText:SetText(GetCycleLabel(raid.cycle))
+        row.statusText:SetText(status)
+        row.timerText:SetText("|cffffffff" .. FormatCountdown(remaining) .. "|r")
+
+        -- Guild lockouts column
+        local gCount = GetGuildLockedCount(raid)
+        if gCount > 0 then
+            local gNames = GetGuildLockedNames(raid)
+            -- Show first 2 names + count if more
+            local display
+            if gCount <= 2 then
+                display = "|cffffaa33" .. table.concat(gNames, ", ") .. "|r"
+            else
+                display = "|cffffaa33" .. gNames[1] .. ", " .. gNames[2] .. "|r |cff888888(+" .. (gCount - 2) .. ")|r"
+            end
+            row.guildText:SetText(display)
+        else
+            row.guildText:SetText("|cff555555--|r")
+        end
+
+        if i == selectedRaid then
+            row.selected:Show()
+        else
+            row.selected:Hide()
+        end
+
+        if i <= visibleRows then
+            row:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 20, -HEADER_TOP - ((i - 1) * ROW_HEIGHT))
+            row:Show()
+        else
             row:Hide()
         end
     end
@@ -474,7 +623,7 @@ local function BuildMainFrame()
     f:SetMovable(true)
     f:SetResizable(true)
     f:SetMinResize(MIN_WIDTH, MIN_HEIGHT)
-    f:SetMaxResize(900, 700)
+    f:SetMaxResize(1000, 750)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function() this:StartMoving() end)
     f:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
@@ -491,7 +640,7 @@ local function BuildMainFrame()
 
     tinsert(UISpecialFrames, "PhantomLockoutMainFrame")
 
-    -- Resize grip (bottom-right corner)
+    -- Resize grip
     local grip = CreateFrame("Frame", nil, f)
     grip:SetWidth(16)
     grip:SetHeight(16)
@@ -499,7 +648,6 @@ local function BuildMainFrame()
     grip:EnableMouse(true)
     grip:SetFrameLevel(f:GetFrameLevel() + 5)
 
-    -- Grip visual: small triangular dots
     local gripTex = grip:CreateTexture(nil, "OVERLAY")
     gripTex:SetAllPoints()
     gripTex:SetTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
@@ -517,7 +665,6 @@ local function BuildMainFrame()
         UpdateRows()
     end)
 
-    -- Also reposition on size changed
     f:SetScript("OnSizeChanged", function()
         RepositionElements()
         UpdateRows()
@@ -543,7 +690,7 @@ local function BuildMainFrame()
     local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -5)
 
-    -- Separator under title
+    -- Separator
     sepLine = f:CreateTexture(nil, "ARTWORK")
     sepLine:SetTexture(1, 1, 1, 0.15)
     sepLine:SetWidth(GetContentWidth() + 5)
@@ -568,7 +715,8 @@ local function BuildMainFrame()
     MakeHeader(hdrFrame, "Size", 195, 50)
     MakeHeader(hdrFrame, "Cycle", 250, 60)
     MakeHeader(hdrFrame, "Status", 315, 80)
-    MakeHeader(hdrFrame, "Resets In", 400, 140)
+    MakeHeader(hdrFrame, "Resets In", 400, 110)
+    MakeHeader(hdrFrame, "Guild Lockouts", 520, 160)
 
     -- Separator under headers
     local sep2 = f:CreateTexture(nil, "ARTWORK")
@@ -577,7 +725,7 @@ local function BuildMainFrame()
     sep2:SetHeight(1)
     sep2:SetPoint("TOPLEFT", hdrFrame, "BOTTOMLEFT", 0, -2)
 
-    -- Info panel (anchored to bottom)
+    -- Info panel
     infoPanel = CreateFrame("Frame", nil, f)
     infoPanel:SetWidth(GetContentWidth())
     infoPanel:SetHeight(INFO_HEIGHT)
@@ -624,7 +772,7 @@ local function BuildMainFrame()
     end)
     resetBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-    -- Refresh saved lockout button
+    -- Refresh lockouts button
     local refreshBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     refreshBtn:SetWidth(120)
     refreshBtn:SetHeight(22)
@@ -638,7 +786,8 @@ local function BuildMainFrame()
         GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
         GameTooltip:AddLine("Refresh Lockouts", 1, 0.82, 0)
         GameTooltip:AddLine("Re-queries the server for your personal", 0.8, 0.8, 0.8, true)
-        GameTooltip:AddLine("raid lockout status.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("raid lockout status and broadcasts", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("to guild members with this addon.", 0.8, 0.8, 0.8, true)
         GameTooltip:Show()
     end)
     refreshBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -708,12 +857,23 @@ function PhantomLockout_ToggleFrame()
 end
 
 ----------------------------------------------------------------------
--- TICK (1 second refresh)
+-- TICK
 ----------------------------------------------------------------------
 
 local updateElapsed = 0
+local broadcastElapsed = 0
+local BROADCAST_INTERVAL = 60  -- broadcast lockouts every 60 seconds
+
 local function OnTick()
     updateElapsed = updateElapsed + arg1
+    broadcastElapsed = broadcastElapsed + arg1
+
+    -- Periodic guild broadcast
+    if broadcastElapsed >= BROADCAST_INTERVAL then
+        broadcastElapsed = 0
+        BroadcastLockouts()
+    end
+
     if updateElapsed < 1 then return end
     updateElapsed = 0
 
@@ -739,20 +899,20 @@ end
 local boot = CreateFrame("Frame")
 boot:RegisterEvent("VARIABLES_LOADED")
 boot:RegisterEvent("UPDATE_INSTANCE_INFO")
+boot:RegisterEvent("CHAT_MSG_ADDON")
 boot:SetScript("OnEvent", function()
     if event == "VARIABLES_LOADED" then
         if not PhantomLockoutDB then
             PhantomLockoutDB = {}
         end
 
-        -- Build everything
+        InitGuildTables()
+
         mainFrame = BuildMainFrame()
         BuildMinimapButton()
 
-        -- Request lockout info from server
         RequestRaidInfo()
 
-        -- Timer tick
         boot:SetScript("OnUpdate", OnTick)
 
         -- Slash commands
@@ -766,6 +926,7 @@ boot:SetScript("OnEvent", function()
                 DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl help|r - Show this help")
                 DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl next|r - Show resets in chat")
                 DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl reset|r - Reset dungeon instances")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl guild|r - Show guild lockout summary")
             elseif msg == "next" then
                 DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Upcoming Resets:")
                 for i = 1, table.getn(RAIDS) do
@@ -774,6 +935,24 @@ boot:SetScript("OnEvent", function()
                     local status, _ = GetPlayerStatus(raid)
                     DEFAULT_CHAT_FRAME:AddMessage(string.format("  |cffffd100%s|r (%s-Man): %s  -  %s",
                         raid.name, raid.size, FormatCountdown(remaining), status))
+                end
+            elseif msg == "guild" then
+                DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Guild Lockouts:")
+                for i = 1, table.getn(RAIDS) do
+                    local raid = RAIDS[i]
+                    local gNames = GetGuildLockedNames(raid)
+                    local gCount = table.getn(gNames)
+                    if gCount > 0 then
+                        DEFAULT_CHAT_FRAME:AddMessage(string.format("  |cffffd100%s|r: |cffffaa33%s|r",
+                            raid.name, table.concat(gNames, ", ")))
+                    end
+                end
+                local totalFound = false
+                for i = 1, table.getn(RAIDS) do
+                    if GetGuildLockedCount(RAIDS[i]) > 0 then totalFound = true end
+                end
+                if not totalFound then
+                    DEFAULT_CHAT_FRAME:AddMessage("  |cff888888No guild lockouts detected (need addon installed).|r")
                 end
             elseif msg == "reset" then
                 StaticPopupDialogs["PHANTOMLOCKOUT_RESET"] = {
@@ -794,14 +973,28 @@ boot:SetScript("OnEvent", function()
             end
         end
 
-        DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r v1.0 loaded. Type |cffffd100/pl|r to toggle.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r v1.1 loaded. Type |cffffd100/pl|r to toggle. Guild sync enabled.")
 
     elseif event == "UPDATE_INSTANCE_INFO" then
-        -- Server responded with our lockout data
         RefreshSavedInstances()
+        BroadcastLockouts()
         UpdateRows()
         if selectedRaid then
             UpdateInfoPanel()
+        end
+
+    elseif event == "CHAT_MSG_ADDON" then
+        -- arg1=prefix, arg2=message, arg3=channel, arg4=sender
+        if arg1 == ADDON_PREFIX and arg3 == "GUILD" then
+            -- Don't process our own messages
+            local myName = UnitName("player")
+            if arg4 and arg4 ~= myName then
+                ParseLockoutMessage(arg4, arg2)
+                UpdateRows()
+                if selectedRaid then
+                    UpdateInfoPanel()
+                end
+            end
         end
     end
 end)
