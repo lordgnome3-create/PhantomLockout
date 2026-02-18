@@ -1,6 +1,6 @@
 ----------------------------------------------------------------------
 -- PhantomLockout - Turtle WoW Raid Lockout Tracker
--- Pure Lua addon - no XML dependency
+-- Pure Lua addon - resizable, personal lockout detection
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------
@@ -114,12 +114,27 @@ local RAIDS = {
 ----------------------------------------------------------------------
 
 local ROW_HEIGHT = 28
-local MAX_VISIBLE_ROWS = 10
+local HEADER_TOP = 78       -- pixels from frame top where rows start
+local INFO_HEIGHT = 55      -- info panel height
+local INFO_BOTTOM = 15      -- info panel margin from bottom
+local RESET_BTN_BOTTOM = 75 -- reset button margin from bottom
+local MIN_WIDTH = 550
+local MIN_HEIGHT = 300
+local DEFAULT_WIDTH = 600
+local DEFAULT_HEIGHT = 440
+
 local selectedRaid = nil
 local rowFrames = {}
 local mainFrame = nil
 local infoText = nil
+local infoPanel = nil
 local serverTimeText = nil
+local resetBtn = nil
+local sepLine = nil
+local hdrFrame = nil
+
+-- Personal lockout tracking
+local savedLockouts = {}  -- keyed by raid name lowercase -> true if locked
 
 ----------------------------------------------------------------------
 -- UTILITY FUNCTIONS
@@ -160,21 +175,91 @@ local function GetCycleLabel(cycle)
     return "?"
 end
 
-local function GetStatusInfo(seconds)
-    if seconds < 3600 then
-        return "|cffff3333IMMINENT|r"
-    elseif seconds < 6 * 3600 then
-        return "|cffff9933SOON|r"
-    elseif seconds < 24 * 3600 then
-        return "|cffffff33TODAY|r"
-    else
-        return "|cff33ff33LOCKED|r"
-    end
-end
-
 local function GetResetDateString(seconds)
     local resetTime = time() + seconds
     return date("!%A, %b %d at %I:%M %p", resetTime) .. " (UTC)"
+end
+
+----------------------------------------------------------------------
+-- PERSONAL LOCKOUT DETECTION
+----------------------------------------------------------------------
+
+local function RefreshSavedInstances()
+    savedLockouts = {}
+    local num = GetNumSavedInstances()
+    if not num or num == 0 then return end
+    for i = 1, num do
+        local name, id, resetTime = GetSavedInstanceInfo(i)
+        if name and resetTime and resetTime > 0 then
+            savedLockouts[string.lower(name)] = true
+        end
+    end
+end
+
+local function IsPlayerLocked(raid)
+    -- Check by full name
+    if savedLockouts[string.lower(raid.name)] then
+        return true
+    end
+    -- Check by short name (some servers report abbreviated names)
+    if savedLockouts[string.lower(raid.short)] then
+        return true
+    end
+    return false
+end
+
+local function GetPlayerStatus(raid)
+    if IsPlayerLocked(raid) then
+        return "|cffff3333LOCKED|r", true
+    else
+        return "|cff33ff33AVAILABLE|r", false
+    end
+end
+
+----------------------------------------------------------------------
+-- LAYOUT HELPERS
+----------------------------------------------------------------------
+
+local function GetVisibleRowCount()
+    if not mainFrame then return 9 end
+    local frameH = mainFrame:GetHeight()
+    local usable = frameH - HEADER_TOP - INFO_HEIGHT - INFO_BOTTOM - RESET_BTN_BOTTOM + 40
+    local count = math.floor(usable / ROW_HEIGHT)
+    if count < 1 then count = 1 end
+    return count
+end
+
+local function GetContentWidth()
+    if not mainFrame then return 555 end
+    return mainFrame:GetWidth() - 45
+end
+
+local function RepositionElements()
+    if not mainFrame then return end
+    local cw = GetContentWidth()
+
+    -- Resize separator
+    if sepLine then
+        sepLine:SetWidth(cw + 5)
+    end
+
+    -- Resize header
+    if hdrFrame then
+        hdrFrame:SetWidth(cw)
+    end
+
+    -- Resize info panel
+    if infoPanel then
+        infoPanel:SetWidth(cw)
+        if infoText then
+            infoText:SetWidth(cw - 15)
+        end
+    end
+
+    -- Resize rows
+    for i = 1, table.getn(rowFrames) do
+        rowFrames[i]:SetWidth(cw)
+    end
 end
 
 ----------------------------------------------------------------------
@@ -199,14 +284,20 @@ local function UpdateInfoPanel()
     end
     local raid = RAIDS[selectedRaid]
     local remaining = GetSecondsUntilReset(raid)
-    local status = GetStatusInfo(remaining)
+    local status, locked = GetPlayerStatus(raid)
+    local lockLabel
+    if locked then
+        lockLabel = "|cffff3333You are saved to this instance.|r"
+    else
+        lockLabel = "|cff33ff33You are not saved. Good to go!|r"
+    end
     infoText:SetText(string.format(
         "|cffffd100%s|r  |cff888888(%s-Man  |  %d bosses)|r\n" ..
-        "Resets in: |cff44ff44%s|r  |cff888888(%s cycle)|r  -  Status: %s\n" ..
-        "|cffaaaaaa%s|r",
+        "Next global reset in: |cff44ff44%s|r  |cff888888(%s cycle)|r  -  %s\n" ..
+        "%s  |cff888888-|r  |cffaaaaaa%s|r",
         raid.name, raid.size, raid.bosses,
         FormatCountdown(remaining), GetCycleLabel(raid.cycle), status,
-        raid.info
+        lockLabel, raid.info
     ))
 end
 
@@ -215,10 +306,11 @@ end
 ----------------------------------------------------------------------
 
 local function CreateRow(parent, index)
+    local cw = GetContentWidth()
     local row = CreateFrame("Button", "PhantomLockoutRow" .. index, parent)
     row:SetHeight(ROW_HEIGHT)
-    row:SetWidth(555)
-    row:SetPoint("TOPLEFT", parent, "TOPLEFT", 20, -78 - ((index - 1) * ROW_HEIGHT))
+    row:SetWidth(cw)
+    row:SetPoint("TOPLEFT", parent, "TOPLEFT", 20, -HEADER_TOP - ((index - 1) * ROW_HEIGHT))
 
     row.bg = row:CreateTexture(nil, "BACKGROUND")
     row.bg:SetAllPoints()
@@ -280,6 +372,7 @@ local function CreateRow(parent, index)
         if not row.raidIndex then return end
         local raid = RAIDS[row.raidIndex]
         local remaining = GetSecondsUntilReset(raid)
+        local pStatus, pLocked = GetPlayerStatus(raid)
         GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
         GameTooltip:AddLine(raid.name, 1, 0.82, 0)
         GameTooltip:AddLine(" ")
@@ -287,6 +380,11 @@ local function CreateRow(parent, index)
         GameTooltip:AddDoubleLine("Bosses:", raid.bosses, 0.8, 0.8, 0.6, 1, 1, 1)
         GameTooltip:AddDoubleLine("Reset Cycle:", GetCycleLabel(raid.cycle), 0.8, 0.8, 0.6, 1, 1, 1)
         GameTooltip:AddDoubleLine("Resets In:", FormatCountdown(remaining), 0.8, 0.8, 0.6, 0.4, 1, 0.4)
+        if pLocked then
+            GameTooltip:AddDoubleLine("Your Status:", "LOCKED", 0.8, 0.8, 0.6, 1, 0.2, 0.2)
+        else
+            GameTooltip:AddDoubleLine("Your Status:", "AVAILABLE", 0.8, 0.8, 0.6, 0.2, 1, 0.2)
+        end
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("Next Reset:", 0.6, 0.6, 0.4)
         GameTooltip:AddLine(GetResetDateString(remaining), 1, 1, 1)
@@ -310,17 +408,23 @@ local function UpdateRows()
     if not mainFrame:IsVisible() then return end
 
     local numRaids = table.getn(RAIDS)
-    for i = 1, MAX_VISIBLE_ROWS do
-        local row = rowFrames[i]
-        if not row then
-            row = CreateRow(mainFrame, i)
-            rowFrames[i] = row
-        end
+    local visibleRows = GetVisibleRowCount()
+    if visibleRows > numRaids then visibleRows = numRaids end
 
+    -- Create rows on demand
+    local totalNeeded = numRaids
+    for i = 1, totalNeeded do
+        if not rowFrames[i] then
+            rowFrames[i] = CreateRow(mainFrame, i)
+        end
+    end
+
+    for i = 1, totalNeeded do
+        local row = rowFrames[i]
         if i <= numRaids then
             local raid = RAIDS[i]
             local remaining = GetSecondsUntilReset(raid)
-            local status = GetStatusInfo(remaining)
+            local status, locked = GetPlayerStatus(raid)
 
             row.raidIndex = i
             row.icon:SetTexture(raid.icon)
@@ -342,7 +446,13 @@ local function UpdateRows()
                 row.selected:Hide()
             end
 
-            row:Show()
+            -- Only show rows that fit
+            if i <= visibleRows then
+                row:SetPoint("TOPLEFT", mainFrame, "TOPLEFT", 20, -HEADER_TOP - ((i - 1) * ROW_HEIGHT))
+                row:Show()
+            else
+                row:Hide()
+            end
         else
             row.raidIndex = nil
             row:Hide()
@@ -356,12 +466,15 @@ end
 
 local function BuildMainFrame()
     local f = CreateFrame("Frame", "PhantomLockoutMainFrame", UIParent)
-    f:SetWidth(600)
-    f:SetHeight(440)
+    f:SetWidth(DEFAULT_WIDTH)
+    f:SetHeight(DEFAULT_HEIGHT)
     f:SetPoint("CENTER", UIParent, "CENTER", 0, 30)
     f:SetFrameStrata("HIGH")
     f:EnableMouse(true)
     f:SetMovable(true)
+    f:SetResizable(true)
+    f:SetMinResize(MIN_WIDTH, MIN_HEIGHT)
+    f:SetMaxResize(900, 700)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function() this:StartMoving() end)
     f:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
@@ -377,6 +490,38 @@ local function BuildMainFrame()
     f:SetBackdropColor(0.05, 0.05, 0.08, 0.92)
 
     tinsert(UISpecialFrames, "PhantomLockoutMainFrame")
+
+    -- Resize grip (bottom-right corner)
+    local grip = CreateFrame("Frame", nil, f)
+    grip:SetWidth(16)
+    grip:SetHeight(16)
+    grip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 6)
+    grip:EnableMouse(true)
+    grip:SetFrameLevel(f:GetFrameLevel() + 5)
+
+    -- Grip visual: small triangular dots
+    local gripTex = grip:CreateTexture(nil, "OVERLAY")
+    gripTex:SetAllPoints()
+    gripTex:SetTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+
+    local gripHi = grip:CreateTexture(nil, "HIGHLIGHT")
+    gripHi:SetAllPoints()
+    gripHi:SetTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+
+    grip:SetScript("OnMouseDown", function()
+        mainFrame:StartSizing("BOTTOMRIGHT")
+    end)
+    grip:SetScript("OnMouseUp", function()
+        mainFrame:StopMovingOrSizing()
+        RepositionElements()
+        UpdateRows()
+    end)
+
+    -- Also reposition on size changed
+    f:SetScript("OnSizeChanged", function()
+        RepositionElements()
+        UpdateRows()
+    end)
 
     -- Title
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
@@ -398,18 +543,18 @@ local function BuildMainFrame()
     local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -5)
 
-    -- Separator
-    local sep = f:CreateTexture(nil, "ARTWORK")
-    sep:SetTexture(1, 1, 1, 0.15)
-    sep:SetWidth(560)
-    sep:SetHeight(1)
-    sep:SetPoint("TOP", f, "TOP", 0, -50)
+    -- Separator under title
+    sepLine = f:CreateTexture(nil, "ARTWORK")
+    sepLine:SetTexture(1, 1, 1, 0.15)
+    sepLine:SetWidth(GetContentWidth() + 5)
+    sepLine:SetHeight(1)
+    sepLine:SetPoint("TOP", f, "TOP", 0, -50)
 
     -- Column headers
-    local hdr = CreateFrame("Frame", nil, f)
-    hdr:SetWidth(555)
-    hdr:SetHeight(20)
-    hdr:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -55)
+    hdrFrame = CreateFrame("Frame", nil, f)
+    hdrFrame:SetWidth(GetContentWidth())
+    hdrFrame:SetHeight(20)
+    hdrFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -55)
 
     local function MakeHeader(parent, text, xOff, width)
         local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -419,24 +564,24 @@ local function BuildMainFrame()
         fs:SetText("|cffffd100" .. text .. "|r")
     end
 
-    MakeHeader(hdr, "Raid Instance", 30, 160)
-    MakeHeader(hdr, "Size", 195, 50)
-    MakeHeader(hdr, "Cycle", 250, 60)
-    MakeHeader(hdr, "Status", 315, 80)
-    MakeHeader(hdr, "Resets In", 400, 140)
+    MakeHeader(hdrFrame, "Raid Instance", 30, 160)
+    MakeHeader(hdrFrame, "Size", 195, 50)
+    MakeHeader(hdrFrame, "Cycle", 250, 60)
+    MakeHeader(hdrFrame, "Status", 315, 80)
+    MakeHeader(hdrFrame, "Resets In", 400, 140)
 
     -- Separator under headers
     local sep2 = f:CreateTexture(nil, "ARTWORK")
     sep2:SetTexture(1, 1, 1, 0.1)
-    sep2:SetWidth(555)
+    sep2:SetWidth(GetContentWidth())
     sep2:SetHeight(1)
-    sep2:SetPoint("TOPLEFT", hdr, "BOTTOMLEFT", 0, -2)
+    sep2:SetPoint("TOPLEFT", hdrFrame, "BOTTOMLEFT", 0, -2)
 
-    -- Info panel
-    local infoPanel = CreateFrame("Frame", nil, f)
-    infoPanel:SetWidth(555)
-    infoPanel:SetHeight(55)
-    infoPanel:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, 15)
+    -- Info panel (anchored to bottom)
+    infoPanel = CreateFrame("Frame", nil, f)
+    infoPanel:SetWidth(GetContentWidth())
+    infoPanel:SetHeight(INFO_HEIGHT)
+    infoPanel:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, INFO_BOTTOM)
     infoPanel:SetBackdrop({
         bgFile = "Interface\\Buttons\\UI-Listbox-Highlight2",
     })
@@ -444,15 +589,15 @@ local function BuildMainFrame()
 
     infoText = infoPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     infoText:SetPoint("TOPLEFT", infoPanel, "TOPLEFT", 8, -5)
-    infoText:SetWidth(540)
+    infoText:SetWidth(GetContentWidth() - 15)
     infoText:SetJustifyH("LEFT")
     infoText:SetText("|cff888888Select a raid for details.|r")
 
     -- Reset Instances button
-    local resetBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    resetBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     resetBtn:SetWidth(155)
     resetBtn:SetHeight(22)
-    resetBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -22, 75)
+    resetBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -22, RESET_BTN_BOTTOM)
     resetBtn:SetText("Reset All Instances")
     resetBtn:SetScript("OnClick", function()
         StaticPopupDialogs["PHANTOMLOCKOUT_RESET"] = {
@@ -478,6 +623,25 @@ local function BuildMainFrame()
         GameTooltip:Show()
     end)
     resetBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    -- Refresh saved lockout button
+    local refreshBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    refreshBtn:SetWidth(120)
+    refreshBtn:SetHeight(22)
+    refreshBtn:SetPoint("RIGHT", resetBtn, "LEFT", -8, 0)
+    refreshBtn:SetText("Refresh Lockouts")
+    refreshBtn:SetScript("OnClick", function()
+        RequestRaidInfo()
+        DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r: Refreshing lockout data...")
+    end)
+    refreshBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Refresh Lockouts", 1, 0.82, 0)
+        GameTooltip:AddLine("Re-queries the server for your personal", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine("raid lockout status.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    refreshBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     f:Hide()
     return f
@@ -529,7 +693,7 @@ local function BuildMinimapButton()
 end
 
 ----------------------------------------------------------------------
--- TOGGLE (global so minimap/slash can call it)
+-- TOGGLE (global)
 ----------------------------------------------------------------------
 
 function PhantomLockout_ToggleFrame()
@@ -538,6 +702,7 @@ function PhantomLockout_ToggleFrame()
         mainFrame:Hide()
     else
         mainFrame:Show()
+        RequestRaidInfo()
         UpdateRows()
     end
 end
@@ -573,57 +738,70 @@ end
 
 local boot = CreateFrame("Frame")
 boot:RegisterEvent("VARIABLES_LOADED")
+boot:RegisterEvent("UPDATE_INSTANCE_INFO")
 boot:SetScript("OnEvent", function()
-    if event ~= "VARIABLES_LOADED" then return end
+    if event == "VARIABLES_LOADED" then
+        if not PhantomLockoutDB then
+            PhantomLockoutDB = {}
+        end
 
-    if not PhantomLockoutDB then
-        PhantomLockoutDB = {}
-    end
+        -- Build everything
+        mainFrame = BuildMainFrame()
+        BuildMinimapButton()
 
-    -- Build everything
-    mainFrame = BuildMainFrame()
-    BuildMinimapButton()
+        -- Request lockout info from server
+        RequestRaidInfo()
 
-    -- Timer tick on the boot frame (always exists, never nil)
-    boot:SetScript("OnUpdate", OnTick)
+        -- Timer tick
+        boot:SetScript("OnUpdate", OnTick)
 
-    -- Slash commands
-    SLASH_PHANTOMLOCKOUT1 = "/phantomlockout"
-    SLASH_PHANTOMLOCKOUT2 = "/pl"
-    SLASH_PHANTOMLOCKOUT3 = "/plock"
-    SlashCmdList["PHANTOMLOCKOUT"] = function(msg)
-        if msg == "help" then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r Commands:")
-            DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl|r - Toggle the lockout window")
-            DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl help|r - Show this help")
-            DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl next|r - Show resets in chat")
-            DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl reset|r - Reset dungeon instances")
-        elseif msg == "next" then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Upcoming Resets:")
-            for i = 1, table.getn(RAIDS) do
-                local raid = RAIDS[i]
-                local remaining = GetSecondsUntilReset(raid)
-                DEFAULT_CHAT_FRAME:AddMessage(string.format("  |cffffd100%s|r (%s-Man): %s",
-                    raid.name, raid.size, FormatCountdown(remaining)))
+        -- Slash commands
+        SLASH_PHANTOMLOCKOUT1 = "/phantomlockout"
+        SLASH_PHANTOMLOCKOUT2 = "/pl"
+        SLASH_PHANTOMLOCKOUT3 = "/plock"
+        SlashCmdList["PHANTOMLOCKOUT"] = function(msg)
+            if msg == "help" then
+                DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r Commands:")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl|r - Toggle the lockout window")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl help|r - Show this help")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl next|r - Show resets in chat")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl reset|r - Reset dungeon instances")
+            elseif msg == "next" then
+                DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Upcoming Resets:")
+                for i = 1, table.getn(RAIDS) do
+                    local raid = RAIDS[i]
+                    local remaining = GetSecondsUntilReset(raid)
+                    local status, _ = GetPlayerStatus(raid)
+                    DEFAULT_CHAT_FRAME:AddMessage(string.format("  |cffffd100%s|r (%s-Man): %s  -  %s",
+                        raid.name, raid.size, FormatCountdown(remaining), status))
+                end
+            elseif msg == "reset" then
+                StaticPopupDialogs["PHANTOMLOCKOUT_RESET"] = {
+                    text = "Reset all dungeon instances?\n\n|cffff8833Does NOT affect raid lockouts.|r",
+                    button1 = "Reset",
+                    button2 = "Cancel",
+                    OnAccept = function()
+                        ResetInstances()
+                        DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r: Dungeon instances reset.")
+                    end,
+                    timeout = 0,
+                    whileDead = true,
+                    hideOnEscape = true,
+                }
+                StaticPopup_Show("PHANTOMLOCKOUT_RESET")
+            else
+                PhantomLockout_ToggleFrame()
             end
-        elseif msg == "reset" then
-            StaticPopupDialogs["PHANTOMLOCKOUT_RESET"] = {
-                text = "Reset all dungeon instances?\n\n|cffff8833Does NOT affect raid lockouts.|r",
-                button1 = "Reset",
-                button2 = "Cancel",
-                OnAccept = function()
-                    ResetInstances()
-                    DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r: Dungeon instances reset.")
-                end,
-                timeout = 0,
-                whileDead = true,
-                hideOnEscape = true,
-            }
-            StaticPopup_Show("PHANTOMLOCKOUT_RESET")
-        else
-            PhantomLockout_ToggleFrame()
+        end
+
+        DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r v1.0 loaded. Type |cffffd100/pl|r to toggle.")
+
+    elseif event == "UPDATE_INSTANCE_INFO" then
+        -- Server responded with our lockout data
+        RefreshSavedInstances()
+        UpdateRows()
+        if selectedRaid then
+            UpdateInfoPanel()
         end
     end
-
-    DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r v1.0 loaded. Type |cffffd100/pl|r to toggle.")
 end)
