@@ -132,6 +132,7 @@ local ROW_HEIGHT = 28
 local MAX_VISIBLE_ROWS = 10
 local selectedRaid = nil
 local rowFrames = {}
+local eventFrame  -- forward declaration; created at bottom of file
 
 ----------------------------------------------------------------------
 -- UTILITY FUNCTIONS
@@ -495,15 +496,14 @@ local function OnEvent()
             end
         end
 
-        -- Set up the update ticker on the main frame
-        PhantomLockoutFrame:SetScript("OnUpdate", OnUpdate)
+        -- Set up the update ticker on the bootstrap frame (safe)
+        eventFrame:SetScript("OnUpdate", OnUpdate)
 
         DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r v1.0 loaded. Type |cffffd100/pl|r to toggle. |cffffd100/pl help|r for commands.")
     end
 end
 
--- Bootstrap: use a Lua-created frame for event registration
--- (PhantomLockoutFrame from XML may not be globally available yet)
-local eventFrame = CreateFrame("Frame")
+-- Bootstrap: create the event frame now that all functions are defined
+eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("VARIABLES_LOADED")
 eventFrame:SetScript("OnEvent", OnEvent)
