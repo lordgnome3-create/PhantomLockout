@@ -149,7 +149,7 @@ local function GetSecondsUntilReset(raid)
     if elapsed < 0 then
         return raid.cycle + elapsed
     end
-    local inCycle = elapsed % raid.cycle
+    local inCycle = math.mod(elapsed, raid.cycle)
     local remaining = raid.cycle - inCycle
     return remaining
 end
@@ -160,9 +160,9 @@ local function FormatCountdown(seconds)
         return "|cff00ff00Resetting...|r"
     end
     local days = math.floor(seconds / 86400)
-    local hours = math.floor((seconds % 86400) / 3600)
-    local mins = math.floor((seconds % 3600) / 60)
-    local secs = math.floor(seconds % 60)
+    local hours = math.floor(math.mod(seconds, 86400) / 3600)
+    local mins = math.floor(math.mod(seconds, 3600) / 60)
+    local secs = math.floor(math.mod(seconds, 60))
 
     if days > 0 then
         return string.format("%dd %02dh %02dm", days, hours, mins)
