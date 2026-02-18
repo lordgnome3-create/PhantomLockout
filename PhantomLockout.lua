@@ -447,19 +447,21 @@ local function UpdateInfoPanel()
         guildStr = "  |cff888888Guild locked:|r |cffffaa33" .. table.concat(guildNames, ", ") .. "|r"
     end
 
-    local timerLabel
+    local timerLine
     if locked then
-        timerLabel = "Lockout expires in"
+        timerLine = string.format("Lockout expires in: |cffff8833%s|r  |cff888888(%s cycle)|r  -  %s",
+            FormatCountdown(remaining), GetCycleLabel(raid.cycle), status)
     else
-        timerLabel = "Next reset in"
+        timerLine = string.format("|cff888888%s cycle|r  -  %s",
+            GetCycleLabel(raid.cycle), status)
     end
 
     infoText:SetText(string.format(
         "|cffffd100%s|r  |cff888888(%s-Man  |  %d bosses)|r\n" ..
-        "%s: |cff44ff44%s|r  |cff888888(%s cycle)|r  -  %s\n" ..
+        "%s\n" ..
         "%s  |cff888888-|r  |cffaaaaaa%s|r%s",
         raid.name, raid.size, raid.bosses,
-        timerLabel, FormatCountdown(remaining), GetCycleLabel(raid.cycle), status,
+        timerLine,
         lockLabel, raid.info, guildStr
     ))
 end
@@ -550,16 +552,17 @@ local function CreateRow(parent, index)
         GameTooltip:AddDoubleLine("Players:", raid.size .. "-Man", 0.8, 0.8, 0.6, 1, 1, 1)
         GameTooltip:AddDoubleLine("Bosses:", raid.bosses, 0.8, 0.8, 0.6, 1, 1, 1)
         GameTooltip:AddDoubleLine("Reset Cycle:", GetCycleLabel(raid.cycle), 0.8, 0.8, 0.6, 1, 1, 1)
-        GameTooltip:AddDoubleLine("Your Lockout:", FormatCountdown(remaining), 0.8, 0.8, 0.6, 0.4, 1, 0.4)
         if pLocked then
+            GameTooltip:AddDoubleLine("Lockout Expires:", FormatCountdown(remaining), 0.8, 0.8, 0.6, 1, 0.53, 0.2)
             GameTooltip:AddDoubleLine("Your Status:", "LOCKED", 0.8, 0.8, 0.6, 1, 0.2, 0.2)
-            GameTooltip:AddDoubleLine("Global Reset:", FormatCountdown(GetSecondsUntilReset(raid)), 0.8, 0.8, 0.6, 0.6, 0.6, 0.4)
         else
             GameTooltip:AddDoubleLine("Your Status:", "AVAILABLE", 0.8, 0.8, 0.6, 0.2, 1, 0.2)
         end
-        GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("Next Reset:", 0.6, 0.6, 0.4)
-        GameTooltip:AddLine(GetResetDateString(remaining), 1, 1, 1)
+        if pLocked then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Unlocks:", 0.6, 0.6, 0.4)
+            GameTooltip:AddLine(GetResetDateString(remaining), 1, 1, 1)
+        end
 
         -- Guild locked names in tooltip
         local gNames = GetGuildLockedNames(raid)
@@ -623,7 +626,13 @@ local function UpdateRows()
 
         row.cycleText:SetText(GetCycleLabel(raid.cycle))
         row.statusText:SetText(status)
-        row.timerText:SetText("|cffffffff" .. FormatCountdown(remaining) .. "|r")
+
+        -- Only show countdown timer for locked raids
+        if locked then
+            row.timerText:SetText("|cffff8833" .. FormatCountdown(remaining) .. "|r")
+        else
+            row.timerText:SetText("|cff555555" .. "---" .. "|r")
+        end
 
         -- Guild lockouts column
         local gCount = GetGuildLockedCount(raid)
@@ -983,10 +992,15 @@ boot:SetScript("OnEvent", function()
                 DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Upcoming Resets:")
                 for i = 1, table.getn(RAIDS) do
                     local raid = RAIDS[i]
-                    local remaining = GetDisplayCountdown(raid)
-                    local status, _, _ = GetPlayerStatus(raid)
-                    DEFAULT_CHAT_FRAME:AddMessage(string.format("  |cffffd100%s|r (%s-Man): %s  -  %s",
-                        raid.name, raid.size, FormatCountdown(remaining), status))
+                    local status, locked, _ = GetPlayerStatus(raid)
+                    if locked then
+                        local remaining = GetDisplayCountdown(raid)
+                        DEFAULT_CHAT_FRAME:AddMessage(string.format("  |cffffd100%s|r (%s-Man): |cffff8833%s|r  -  %s",
+                            raid.name, raid.size, FormatCountdown(remaining), status))
+                    else
+                        DEFAULT_CHAT_FRAME:AddMessage(string.format("  |cffffd100%s|r (%s-Man): %s",
+                            raid.name, raid.size, status))
+                    end
                 end
             elseif msg == "guild" then
                 DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Guild Lockouts:")
