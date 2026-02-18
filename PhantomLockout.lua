@@ -177,28 +177,28 @@ end
 
 local function GetSecondsUntilReset(raid)
     if raid.cycle == CYCLE_7DAY then
-        -- Weekly reset: Tuesday at 23:00 server time
-        -- GetGameTime() gives server hours/minutes
-        local serverH, serverM = GetGameTime()
+        -- Weekly reset: Tuesday 23:00 EST = Wednesday 04:00 UTC
+        -- Calculate entirely in UTC to avoid local timezone mismatches
+        local now = time()
+        local utcDay = tonumber(date("!%w", now))    -- 0=Sun,1=Mon,...6=Sat
+        local utcHour = tonumber(date("!%H", now))
+        local utcMin = tonumber(date("!%M", now))
+        local utcSec = tonumber(date("!%S", now))
 
-        -- Get local day of week (0=Sun, 1=Mon, 2=Tue, ... 6=Sat)
-        -- On most systems this matches server day closely enough
-        local wday = tonumber(date("%w"))
+        -- Target: Wednesday (3) at 04:00 UTC
+        local TARGET_DAY = 3
+        local TARGET_HOUR = 4
 
-        -- Reset target: Tuesday (wday=2) at 23:00 server time
-        local RESET_WDAY = 2
-        local RESET_HOUR = 23
+        -- Seconds into current week (from Sunday 00:00 UTC)
+        local nowInWeek = utcDay * 86400 + utcHour * 3600 + utcMin * 60 + utcSec
+        local targetInWeek = TARGET_DAY * 86400 + TARGET_HOUR * 3600
 
-        -- Convert current position and reset position to minutes-in-week
-        local nowMins = wday * 1440 + serverH * 60 + serverM
-        local resetMins = RESET_WDAY * 1440 + RESET_HOUR * 60
-
-        local diffMins = resetMins - nowMins
-        if diffMins <= 0 then
-            diffMins = diffMins + 7 * 1440  -- wrap to next week
+        local diff = targetInWeek - nowInWeek
+        if diff <= 0 then
+            diff = diff + 7 * 86400  -- wrap to next week
         end
 
-        return diffMins * 60  -- convert to seconds
+        return diff
     else
         -- Rolling resets (5-day, 3-day): anchor + modulo
         local now = time()
@@ -712,11 +712,11 @@ local function BuildMainFrame()
     sub:SetPoint("TOP", title, "BOTTOM", 0, -2)
     sub:SetText("|cff888888Turtle WoW Raid Reset Tracker|r")
 
-    -- Server time
+    -- Time displays (top left)
     serverTimeText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    serverTimeText:SetPoint("TOPRIGHT", f, "TOPRIGHT", -20, -18)
+    serverTimeText:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -18)
     serverTimeText:SetTextColor(0.8, 0.8, 0.6)
-    serverTimeText:SetText("Server Time: --:--")
+    serverTimeText:SetText("Server: --:--  |  Local: --:--")
 
     -- Close button
     local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
@@ -914,7 +914,12 @@ local function OnTick()
 
     local hours, minutes = GetGameTime()
     if serverTimeText then
-        serverTimeText:SetText(string.format("Server Time: %02d:%02d", hours, minutes))
+        local localH = tonumber(date("%H"))
+        local localM = tonumber(date("%M"))
+        serverTimeText:SetText(string.format(
+            "|cffffd100Server:|r %02d:%02d  |cff888888|||r  |cffffd100Local:|r %02d:%02d",
+            hours, minutes, localH, localM
+        ))
     end
 
     UpdateRows()
