@@ -978,7 +978,7 @@ boot:SetScript("OnEvent", function()
 
         -- Slash commands
         SLASH_PHANTOMLOCKOUT1 = "/phantomlockout"
-        SLASH_PHANTOMLOCKOUT2 = "/pl"
+        SLASH_PHANTOMLOCKOUT2 = "/plockout"
         SLASH_PHANTOMLOCKOUT3 = "/plock"
         SlashCmdList["PHANTOMLOCKOUT"] = function(msg)
             if msg == "help" then
