@@ -603,12 +603,13 @@ local function CreateRow(parent, index)
         UpdateInfoPanel()
     end)
 
-    -- Tooltip
-    row:SetScript("OnEnter", function()
+    -- Tooltip builder (reusable so it can tick)
+    local function BuildRowTooltip()
         if not row.raidIndex then return end
         local raid = RAIDS[row.raidIndex]
         local remaining = GetDisplayCountdown(raid)
         local pStatus, pLocked, pTime = GetPlayerStatus(raid)
+        GameTooltip:ClearLines()
         GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
         GameTooltip:AddLine(raid.name, 1, 0.82, 0)
         GameTooltip:AddLine(" ")
@@ -627,7 +628,7 @@ local function CreateRow(parent, index)
             GameTooltip:AddLine(GetResetDateString(remaining), 1, 1, 1)
         end
 
-        -- Guild locked names in tooltip with individual timers
+        -- Guild locked names with live timers
         local gNames = GetGuildLockedNames(raid)
         if table.getn(gNames) > 0 then
             GameTooltip:AddLine(" ")
@@ -648,9 +649,33 @@ local function CreateRow(parent, index)
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("|cff888888Click for details|r")
         GameTooltip:Show()
+    end
+
+    -- Hover state and tick timer
+    row.isHovered = false
+    row.tooltipElapsed = 0
+
+    row:SetScript("OnEnter", function()
+        row.isHovered = true
+        row.tooltipElapsed = 0
+        BuildRowTooltip()
     end)
 
-    row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    row:SetScript("OnLeave", function()
+        row.isHovered = false
+        row.tooltipElapsed = 0
+        GameTooltip:Hide()
+    end)
+
+    -- Tick the tooltip every second while hovering
+    row:SetScript("OnUpdate", function()
+        if not row.isHovered then return end
+        row.tooltipElapsed = row.tooltipElapsed + arg1
+        if row.tooltipElapsed >= 1 then
+            row.tooltipElapsed = 0
+            BuildRowTooltip()
+        end
+    end)
 
     row:Hide()
     return row
