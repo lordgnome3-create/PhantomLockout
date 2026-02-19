@@ -773,14 +773,14 @@ local function BuildMainFrame()
     f:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
 
     f:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
         edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border",
         tile = true,
-        tileSize = 32,
+        tileSize = 16,
         edgeSize = 32,
         insets = { left = 11, right = 12, top = 12, bottom = 11 },
     })
-    f:SetBackdropColor(0.08, 0.08, 0.08, 1.0)
+    f:SetBackdropColor(0.1, 0.1, 0.1, 1.0)
 
     tinsert(UISpecialFrames, "PhantomLockoutMainFrame")
 
