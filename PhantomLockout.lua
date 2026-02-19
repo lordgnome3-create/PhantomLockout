@@ -158,7 +158,7 @@ local hdrFrame = nil
 -- Personal lockout tracking
 local savedLockouts = {}
 
--- Guild lockout tracking: guildLockouts[raidShortLower] = { ["PlayerName"] = true, ... }
+-- Guild lockout tracking: guildLockouts[raidShortLower] = { ["PlayerName"] = expiryEpoch, ... }
 local guildLockouts = {}
 
 -- Initialize guild lockout tables for each raid
@@ -169,6 +169,36 @@ local function InitGuildTables()
             guildLockouts[key] = {}
         end
     end
+end
+
+-- Prune expired guild lockout entries
+local function PruneGuildLockouts()
+    local now = time()
+    for i = 1, table.getn(RAIDS) do
+        local key = string.lower(RAIDS[i].short)
+        if guildLockouts[key] then
+            for name, expiry in pairs(guildLockouts[key]) do
+                if type(expiry) ~= "number" or expiry <= now then
+                    guildLockouts[key][name] = nil
+                end
+            end
+        end
+    end
+end
+
+-- Save guild lockout data to SavedVariables
+local function SaveGuildData()
+    if not PhantomLockoutDB then PhantomLockoutDB = {} end
+    PhantomLockoutDB.guildData = guildLockouts
+end
+
+-- Load guild lockout data from SavedVariables
+local function LoadGuildData()
+    if PhantomLockoutDB and PhantomLockoutDB.guildData then
+        guildLockouts = PhantomLockoutDB.guildData
+    end
+    InitGuildTables()
+    PruneGuildLockouts()
 end
 
 ----------------------------------------------------------------------
@@ -292,12 +322,14 @@ end
 -- GUILD LOCKOUT COMMUNICATION
 ----------------------------------------------------------------------
 
--- Build a message string of our locked raids: "MC,BWL,Naxx"
+-- Build a message string with expiry times: "MC:1736400000,BWL:1736500000"
 local function BuildLockoutMessage()
     local parts = {}
     for i = 1, table.getn(RAIDS) do
-        if IsPlayerLocked(RAIDS[i]) then
-            table.insert(parts, RAIDS[i].short)
+        local locked, personalTime = IsPlayerLocked(RAIDS[i])
+        if locked and personalTime then
+            local expiry = time() + personalTime
+            table.insert(parts, RAIDS[i].short .. ":" .. expiry)
         end
     end
     if table.getn(parts) == 0 then
@@ -327,11 +359,13 @@ local function ParseLockoutMessage(sender, message)
         end
     end
 
-    -- If they have no lockouts, we're done
-    if payload == "NONE" then return end
+    -- If they have no lockouts, save and return
+    if payload == "NONE" then
+        SaveGuildData()
+        return
+    end
 
-    -- Parse comma-separated raid shorts
-    -- Manual split for vanilla Lua (no string.split)
+    -- Parse comma-separated "SHORT:EXPIRY" pairs
     local start = 1
     while true do
         local commaPos = string.find(payload, ",", start, true)
@@ -343,26 +377,41 @@ local function ParseLockoutMessage(sender, message)
             token = string.sub(payload, start)
         end
         if token and token ~= "" then
-            local key = string.lower(token)
-            if guildLockouts[key] then
-                guildLockouts[key][sender] = true
+            -- Split on ":"
+            local colonPos = string.find(token, ":", 1, true)
+            if colonPos then
+                local raidShort = string.sub(token, 1, colonPos - 1)
+                local expiryStr = string.sub(token, colonPos + 1)
+                local expiry = tonumber(expiryStr)
+                local key = string.lower(raidShort)
+                if guildLockouts[key] and expiry and expiry > time() then
+                    guildLockouts[key][sender] = expiry
+                end
+            else
+                -- Legacy format without expiry: treat as locked until next likely reset
+                local key = string.lower(token)
+                if guildLockouts[key] then
+                    guildLockouts[key][sender] = time() + CYCLE_7DAY
+                end
             end
         end
         if not commaPos then break end
     end
+
+    SaveGuildData()
 end
 
--- Get list of guild members locked to a specific raid
+-- Get list of guild members locked to a specific raid (with valid expiry)
 local function GetGuildLockedNames(raid)
     local key = string.lower(raid.short)
     local names = {}
+    local now = time()
     if not guildLockouts[key] then return names end
-    for name, v in pairs(guildLockouts[key]) do
-        if v then
+    for name, expiry in pairs(guildLockouts[key]) do
+        if type(expiry) == "number" and expiry > now then
             table.insert(names, name)
         end
     end
-    -- Sort alphabetically
     table.sort(names)
     return names
 end
@@ -371,10 +420,24 @@ local function GetGuildLockedCount(raid)
     local key = string.lower(raid.short)
     if not guildLockouts[key] then return 0 end
     local count = 0
-    for name, v in pairs(guildLockouts[key]) do
-        if v then count = count + 1 end
+    local now = time()
+    for name, expiry in pairs(guildLockouts[key]) do
+        if type(expiry) == "number" and expiry > now then
+            count = count + 1
+        end
     end
     return count
+end
+
+-- Get a member's remaining lockout seconds
+local function GetGuildMemberLockoutRemaining(raid, memberName)
+    local key = string.lower(raid.short)
+    if not guildLockouts[key] then return nil end
+    local expiry = guildLockouts[key][memberName]
+    if not expiry or type(expiry) ~= "number" then return nil end
+    local remaining = expiry - time()
+    if remaining <= 0 then return nil end
+    return remaining
 end
 
 ----------------------------------------------------------------------
@@ -564,13 +627,18 @@ local function CreateRow(parent, index)
             GameTooltip:AddLine(GetResetDateString(remaining), 1, 1, 1)
         end
 
-        -- Guild locked names in tooltip
+        -- Guild locked names in tooltip with individual timers
         local gNames = GetGuildLockedNames(raid)
         if table.getn(gNames) > 0 then
             GameTooltip:AddLine(" ")
             GameTooltip:AddLine("Guild Members Locked (" .. table.getn(gNames) .. "):", 1, 0.67, 0.2)
             for gi = 1, table.getn(gNames) do
-                GameTooltip:AddLine("  " .. gNames[gi], 1, 0.85, 0.5)
+                local memberRemaining = GetGuildMemberLockoutRemaining(raid, gNames[gi])
+                if memberRemaining then
+                    GameTooltip:AddDoubleLine("  " .. gNames[gi], FormatCountdown(memberRemaining), 1, 0.85, 0.5, 0.8, 0.6, 0.2)
+                else
+                    GameTooltip:AddLine("  " .. gNames[gi], 1, 0.85, 0.5)
+                end
             end
         else
             GameTooltip:AddLine(" ")
@@ -692,7 +760,7 @@ local function BuildMainFrame()
         edgeSize = 32,
         insets = { left = 11, right = 12, top = 12, bottom = 11 },
     })
-    f:SetBackdropColor(0.05, 0.05, 0.08, 0.92)
+    f:SetBackdropColor(0.01, 0.01, 0.02, 0.97)
 
     tinsert(UISpecialFrames, "PhantomLockoutMainFrame")
 
@@ -918,16 +986,26 @@ end
 
 local updateElapsed = 0
 local broadcastElapsed = 0
-local BROADCAST_INTERVAL = 60  -- broadcast lockouts every 60 seconds
+local pruneElapsed = 0
+local BROADCAST_INTERVAL = 60
+local PRUNE_INTERVAL = 300  -- prune expired guild data every 5 minutes
 
 local function OnTick()
     updateElapsed = updateElapsed + arg1
     broadcastElapsed = broadcastElapsed + arg1
+    pruneElapsed = pruneElapsed + arg1
 
     -- Periodic guild broadcast
     if broadcastElapsed >= BROADCAST_INTERVAL then
         broadcastElapsed = 0
         BroadcastLockouts()
+    end
+
+    -- Periodic prune of expired guild lockouts
+    if pruneElapsed >= PRUNE_INTERVAL then
+        pruneElapsed = 0
+        PruneGuildLockouts()
+        SaveGuildData()
     end
 
     if updateElapsed < 1 then return end
@@ -967,7 +1045,7 @@ boot:SetScript("OnEvent", function()
             PhantomLockoutDB = {}
         end
 
-        InitGuildTables()
+        LoadGuildData()
 
         mainFrame = BuildMainFrame()
         BuildMinimapButton()
@@ -978,7 +1056,7 @@ boot:SetScript("OnEvent", function()
 
         -- Slash commands
         SLASH_PHANTOMLOCKOUT1 = "/phantomlockout"
-        SLASH_PHANTOMLOCKOUT2 = "/plockout"
+        SLASH_PHANTOMLOCKOUT2 = "/pl"
         SLASH_PHANTOMLOCKOUT3 = "/plock"
         SlashCmdList["PHANTOMLOCKOUT"] = function(msg)
             if msg == "help" then
