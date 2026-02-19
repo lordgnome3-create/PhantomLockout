@@ -164,6 +164,11 @@ local guildLockouts = {}
 -- Track all guild members who have the addon installed (anyone who sends a message)
 local addonUsers = {}  -- ["PlayerName"] = lastSeenEpoch
 
+-- Guild MOTD (message of the day) - shared message editable by admins only
+local guildMOTD = ""
+local MOTD_ADMINS = { ["Mczuknuuk"] = true, ["Morganni"] = true }
+local motdFrame = nil
+
 -- Initialize guild lockout tables for each raid
 local function InitGuildTables()
     for i = 1, table.getn(RAIDS) do
@@ -194,6 +199,7 @@ local function SaveGuildData()
     if not PhantomLockoutDB then PhantomLockoutDB = {} end
     PhantomLockoutDB.guildData = guildLockouts
     PhantomLockoutDB.addonUsers = addonUsers
+    PhantomLockoutDB.motd = guildMOTD
 end
 
 -- Load guild lockout data from SavedVariables
@@ -203,6 +209,9 @@ local function LoadGuildData()
     end
     if PhantomLockoutDB and PhantomLockoutDB.addonUsers then
         addonUsers = PhantomLockoutDB.addonUsers
+    end
+    if PhantomLockoutDB and PhantomLockoutDB.motd then
+        guildMOTD = PhantomLockoutDB.motd
     end
     InitGuildTables()
     PruneGuildLockouts()
@@ -483,6 +492,186 @@ local function InviteAvailableMembers(raid)
     for i = 1, count do
         InviteByName(available[i])
         DEFAULT_CHAT_FRAME:AddMessage("  |cff33ff33+|r " .. available[i])
+    end
+end
+
+----------------------------------------------------------------------
+-- GUILD MOTD (admin message)
+----------------------------------------------------------------------
+
+local function IsPlayerAdmin()
+    local myName = UnitName("player")
+    return MOTD_ADMINS[myName] == true
+end
+
+-- Broadcast MOTD to guild
+local function BroadcastMOTD()
+    if not IsInGuild() then return end
+    if guildMOTD and guildMOTD ~= "" then
+        SendAddonMessage(ADDON_PREFIX, "MOTD:" .. guildMOTD, "GUILD")
+    else
+        SendAddonMessage(ADDON_PREFIX, "MOTD:", "GUILD")
+    end
+end
+
+-- Parse incoming MOTD
+local function ParseMOTDMessage(sender, message)
+    if not message then return end
+    if string.sub(message, 1, 5) ~= "MOTD:" then return end
+    -- Only accept MOTD from admins
+    if not MOTD_ADMINS[sender] then return end
+    local newMOTD = string.sub(message, 6)
+    guildMOTD = newMOTD
+    SaveGuildData()
+    -- Update the MOTD frame if it's open
+    if motdFrame and motdFrame:IsVisible() and motdFrame.messageText then
+        motdFrame.messageText:SetText(guildMOTD ~= "" and guildMOTD or "|cff555555No message set.|r")
+    end
+end
+
+-- Build MOTD popup frame
+local function BuildMOTDFrame()
+    local mf = CreateFrame("Frame", "PhantomLockoutMOTDFrame", UIParent)
+    mf:SetWidth(400)
+    mf:SetHeight(250)
+    mf:SetPoint("CENTER", UIParent, "CENTER", 0, 50)
+    mf:SetFrameStrata("DIALOG")
+    mf:EnableMouse(true)
+    mf:SetMovable(true)
+    mf:RegisterForDrag("LeftButton")
+    mf:SetScript("OnDragStart", function() this:StartMoving() end)
+    mf:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
+
+    mf:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border",
+        tile = true,
+        tileSize = 16,
+        edgeSize = 32,
+        insets = { left = 11, right = 12, top = 12, bottom = 11 },
+    })
+    mf:SetBackdropColor(0.1, 0.1, 0.1, 1.0)
+
+    tinsert(UISpecialFrames, "PhantomLockoutMOTDFrame")
+
+    -- Close button
+    local closeBtn = CreateFrame("Button", nil, mf, "UIPanelCloseButton")
+    closeBtn:SetPoint("TOPRIGHT", mf, "TOPRIGHT", -5, -5)
+
+    -- Title
+    local titleText = mf:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    titleText:SetPoint("TOP", mf, "TOP", 0, -18)
+    titleText:SetText("|cff8800ffPhantom|r|cffcc44ffLockout|r |cffffd100Board|r")
+
+    -- Separator
+    local sep = mf:CreateTexture(nil, "ARTWORK")
+    sep:SetTexture(1, 1, 1, 0.15)
+    sep:SetWidth(360)
+    sep:SetHeight(1)
+    sep:SetPoint("TOP", mf, "TOP", 0, -42)
+
+    -- Message display area
+    local msgBg = CreateFrame("Frame", nil, mf)
+    msgBg:SetWidth(360)
+    msgBg:SetHeight(130)
+    msgBg:SetPoint("TOP", sep, "BOTTOM", 0, -8)
+    msgBg:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true,
+        tileSize = 16,
+        edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    msgBg:SetBackdropColor(0.05, 0.05, 0.05, 1.0)
+    msgBg:SetBackdropBorderColor(0.4, 0.4, 0.4, 0.8)
+
+    mf.messageText = msgBg:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    mf.messageText:SetPoint("TOPLEFT", msgBg, "TOPLEFT", 10, -10)
+    mf.messageText:SetPoint("BOTTOMRIGHT", msgBg, "BOTTOMRIGHT", -10, 10)
+    mf.messageText:SetJustifyH("LEFT")
+    mf.messageText:SetJustifyV("TOP")
+    mf.messageText:SetText(guildMOTD ~= "" and guildMOTD or "|cff555555No message set.|r")
+
+    -- Admin controls (only visible to admins)
+    if IsPlayerAdmin() then
+        -- Edit box
+        local editScrollFrame = CreateFrame("ScrollFrame", "PhantomLockoutMOTDScroll", mf, "UIPanelScrollFrameTemplate")
+        editScrollFrame:SetWidth(340)
+        editScrollFrame:SetHeight(130)
+        editScrollFrame:SetPoint("TOPLEFT", msgBg, "TOPLEFT", 5, -5)
+
+        local editBox = CreateFrame("EditBox", "PhantomLockoutMOTDEditBox", editScrollFrame)
+        editBox:SetWidth(320)
+        editBox:SetHeight(120)
+        editBox:SetMultiLine(true)
+        editBox:SetAutoFocus(false)
+        editBox:SetFontObject(GameFontNormal)
+        editBox:SetTextColor(1, 1, 1)
+        editBox:SetText(guildMOTD or "")
+        editBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
+        editScrollFrame:SetScrollChild(editBox)
+
+        -- Hide the static text when admin
+        mf.messageText:Hide()
+
+        mf.editBox = editBox
+
+        -- Save button
+        local saveBtn = CreateFrame("Button", nil, mf, "UIPanelButtonTemplate")
+        saveBtn:SetWidth(100)
+        saveBtn:SetHeight(22)
+        saveBtn:SetPoint("BOTTOMRIGHT", mf, "BOTTOMRIGHT", -20, 15)
+        saveBtn:SetText("Save & Share")
+        saveBtn:SetScript("OnClick", function()
+            local newText = mf.editBox:GetText() or ""
+            guildMOTD = newText
+            SaveGuildData()
+            BroadcastMOTD()
+            DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r: Board message updated and shared.")
+        end)
+
+        -- Clear button
+        local clearBtn = CreateFrame("Button", nil, mf, "UIPanelButtonTemplate")
+        clearBtn:SetWidth(80)
+        clearBtn:SetHeight(22)
+        clearBtn:SetPoint("RIGHT", saveBtn, "LEFT", -8, 0)
+        clearBtn:SetText("Clear")
+        clearBtn:SetScript("OnClick", function()
+            mf.editBox:SetText("")
+            guildMOTD = ""
+            SaveGuildData()
+            BroadcastMOTD()
+            DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r: Board message cleared.")
+        end)
+
+        -- Admin label
+        local adminLabel = mf:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        adminLabel:SetPoint("BOTTOMLEFT", mf, "BOTTOMLEFT", 20, 19)
+        adminLabel:SetText("|cffff8833Admin Mode|r")
+    end
+
+    mf:Hide()
+    return mf
+end
+
+-- Toggle MOTD frame
+local function ToggleMOTDFrame()
+    if not motdFrame then
+        motdFrame = BuildMOTDFrame()
+    end
+    if motdFrame:IsVisible() then
+        motdFrame:Hide()
+    else
+        -- Refresh display text for non-admins
+        if not IsPlayerAdmin() and motdFrame.messageText then
+            motdFrame.messageText:SetText(guildMOTD ~= "" and guildMOTD or "|cff555555No message set.|r")
+        end
+        -- Refresh edit box text for admins
+        if IsPlayerAdmin() and motdFrame.editBox then
+            motdFrame.editBox:SetText(guildMOTD or "")
+        end
+        motdFrame:Show()
     end
 end
 
@@ -1009,6 +1198,24 @@ local function BuildMainFrame()
     end)
     refreshBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
+    -- Hidden MOTD button (bottom-left)
+    local motdBtn = CreateFrame("Button", nil, f)
+    motdBtn:SetWidth(20)
+    motdBtn:SetHeight(20)
+    motdBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 14, 14)
+    motdBtn:SetFrameLevel(f:GetFrameLevel() + 5)
+    -- Invisible - no textures
+    motdBtn:SetScript("OnClick", function()
+        ToggleMOTDFrame()
+    end)
+    motdBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("|cff8800ffPhantom|r|cffcc44ffLockout|r Board", 1, 1, 1)
+        GameTooltip:AddLine("Click to view guild board message.", 0.8, 0.8, 0.8)
+        GameTooltip:Show()
+    end)
+    motdBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
     f:Hide()
     return f
 end
@@ -1080,6 +1287,8 @@ end
 local updateElapsed = 0
 local broadcastElapsed = 0
 local pruneElapsed = 0
+local motdBroadcastDelay = 0
+local motdBroadcasted = false
 local BROADCAST_INTERVAL = 60
 local PRUNE_INTERVAL = 300  -- prune expired guild data every 5 minutes
 
@@ -1087,6 +1296,17 @@ local function OnTick()
     updateElapsed = updateElapsed + arg1
     broadcastElapsed = broadcastElapsed + arg1
     pruneElapsed = pruneElapsed + arg1
+
+    -- One-time delayed MOTD broadcast for admins on login
+    if not motdBroadcasted then
+        motdBroadcastDelay = motdBroadcastDelay + arg1
+        if motdBroadcastDelay >= 10 then
+            motdBroadcasted = true
+            if IsPlayerAdmin() and guildMOTD ~= "" then
+                BroadcastMOTD()
+            end
+        end
+    end
 
     -- Periodic guild broadcast
     if broadcastElapsed >= BROADCAST_INTERVAL then
@@ -1224,13 +1444,17 @@ boot:SetScript("OnEvent", function()
     elseif event == "CHAT_MSG_ADDON" then
         -- arg1=prefix, arg2=message, arg3=channel, arg4=sender
         if arg1 == ADDON_PREFIX and arg3 == "GUILD" then
-            -- Don't process our own messages
             local myName = UnitName("player")
             if arg4 and arg4 ~= myName then
-                ParseLockoutMessage(arg4, arg2)
-                UpdateRows()
-                if selectedRaid then
-                    UpdateInfoPanel()
+                -- Check if it's a MOTD message
+                if arg2 and string.sub(arg2, 1, 5) == "MOTD:" then
+                    ParseMOTDMessage(arg4, arg2)
+                else
+                    ParseLockoutMessage(arg4, arg2)
+                    UpdateRows()
+                    if selectedRaid then
+                        UpdateInfoPanel()
+                    end
                 end
             end
         end
