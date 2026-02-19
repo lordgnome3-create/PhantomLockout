@@ -161,6 +161,9 @@ local savedLockouts = {}
 -- Guild lockout tracking: guildLockouts[raidShortLower] = { ["PlayerName"] = expiryEpoch, ... }
 local guildLockouts = {}
 
+-- Track all guild members who have the addon installed (anyone who sends a message)
+local addonUsers = {}  -- ["PlayerName"] = lastSeenEpoch
+
 -- Initialize guild lockout tables for each raid
 local function InitGuildTables()
     for i = 1, table.getn(RAIDS) do
@@ -190,12 +193,16 @@ end
 local function SaveGuildData()
     if not PhantomLockoutDB then PhantomLockoutDB = {} end
     PhantomLockoutDB.guildData = guildLockouts
+    PhantomLockoutDB.addonUsers = addonUsers
 end
 
 -- Load guild lockout data from SavedVariables
 local function LoadGuildData()
     if PhantomLockoutDB and PhantomLockoutDB.guildData then
         guildLockouts = PhantomLockoutDB.guildData
+    end
+    if PhantomLockoutDB and PhantomLockoutDB.addonUsers then
+        addonUsers = PhantomLockoutDB.addonUsers
     end
     InitGuildTables()
     PruneGuildLockouts()
@@ -349,6 +356,10 @@ end
 local function ParseLockoutMessage(sender, message)
     if not message then return end
     if string.sub(message, 1, 9) ~= "LOCKOUTS:" then return end
+
+    -- Record this sender as having the addon
+    addonUsers[sender] = time()
+
     local payload = string.sub(message, 10)
 
     -- Clear this sender from all raids first
@@ -433,6 +444,46 @@ local function GetGuildMemberLockoutRemaining(raid, memberName)
     local remaining = expiry - time()
     if remaining <= 0 then return nil end
     return remaining
+end
+
+-- Check if a guild member is locked to a specific raid
+local function IsGuildMemberLocked(raid, memberName)
+    local key = string.lower(raid.short)
+    if not guildLockouts[key] then return false end
+    local expiry = guildLockouts[key][memberName]
+    if not expiry or type(expiry) ~= "number" then return false end
+    return expiry > time()
+end
+
+-- Get all addon users who are NOT locked to a specific raid
+local function GetAvailableMembers(raid)
+    local myName = UnitName("player")
+    local available = {}
+    for name, lastSeen in pairs(addonUsers) do
+        if name ~= myName then
+            if not IsGuildMemberLocked(raid, name) then
+                table.insert(available, name)
+            end
+        end
+    end
+    table.sort(available)
+    return available
+end
+
+-- Invite all available members for a raid
+local function InviteAvailableMembers(raid)
+    local available = GetAvailableMembers(raid)
+    local count = table.getn(available)
+    if count == 0 then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r: No available guild members with addon for " .. raid.name .. ".")
+        return
+    end
+
+    DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r: Inviting " .. count .. " available members for |cffffd100" .. raid.name .. "|r:")
+    for i = 1, count do
+        InviteByName(available[i])
+        DEFAULT_CHAT_FRAME:AddMessage("  |cff33ff33+|r " .. available[i])
+    end
 end
 
 ----------------------------------------------------------------------
@@ -591,11 +642,32 @@ local function CreateRow(parent, index)
     row.guildText:SetWidth(160)
     row.guildText:SetJustifyH("LEFT")
 
-    -- Click
+    -- Register both mouse buttons
+    row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+    -- Click: Left = select, Right = invite available members
     row:SetScript("OnClick", function()
-        selectedRaid = row.raidIndex
-        UpdateSelection()
-        UpdateInfoPanel()
+        if not row.raidIndex then return end
+        if arg1 == "RightButton" then
+            local raid = RAIDS[row.raidIndex]
+            -- Confirm before inviting
+            StaticPopupDialogs["PHANTOMLOCKOUT_INVITE"] = {
+                text = "Invite all available guild members\nwith PhantomLockout for:\n\n|cffffd100" .. raid.name .. "|r?",
+                button1 = "Invite",
+                button2 = "Cancel",
+                OnAccept = function()
+                    InviteAvailableMembers(raid)
+                end,
+                timeout = 0,
+                whileDead = true,
+                hideOnEscape = true,
+            }
+            StaticPopup_Show("PHANTOMLOCKOUT_INVITE")
+        else
+            selectedRaid = row.raidIndex
+            UpdateSelection()
+            UpdateInfoPanel()
+        end
     end)
 
     -- Tooltip builder (reusable so it can tick)
@@ -642,7 +714,8 @@ local function CreateRow(parent, index)
         end
 
         GameTooltip:AddLine(" ")
-        GameTooltip:AddLine("|cff888888Click for details|r")
+        GameTooltip:AddLine("|cff888888Left-click for details|r")
+        GameTooltip:AddLine("|cff888888Right-click to invite available members|r")
         GameTooltip:Show()
     end
 
@@ -1086,6 +1159,7 @@ boot:SetScript("OnEvent", function()
                 DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout next|r - Show resets in chat")
                 DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout reset|r - Reset dungeon instances")
                 DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout guild|r - Show guild lockout summary")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cff888888Right-click a raid to invite all available guild members with addon.|r")
             elseif msg == "next" then
                 DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Upcoming Resets:")
                 for i = 1, table.getn(RAIDS) do
