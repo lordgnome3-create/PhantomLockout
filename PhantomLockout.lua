@@ -780,7 +780,7 @@ local function BuildMainFrame()
         edgeSize = 32,
         insets = { left = 11, right = 12, top = 12, bottom = 11 },
     })
-    f:SetBackdropColor(0.01, 0.01, 0.02, 0.97)
+    f:SetBackdropColor(0.08, 0.08, 0.08, 1.0)
 
     tinsert(UISpecialFrames, "PhantomLockoutMainFrame")
 
