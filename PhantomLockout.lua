@@ -322,14 +322,14 @@ end
 -- GUILD LOCKOUT COMMUNICATION
 ----------------------------------------------------------------------
 
--- Build a message string with expiry times: "MC:1736400000,BWL:1736500000"
+-- Build a message string with remaining seconds: "MC:25200,BWL:86400"
 local function BuildLockoutMessage()
     local parts = {}
     for i = 1, table.getn(RAIDS) do
         local locked, personalTime = IsPlayerLocked(RAIDS[i])
-        if locked and personalTime then
-            local expiry = time() + personalTime
-            table.insert(parts, RAIDS[i].short .. ":" .. expiry)
+        if locked and personalTime and personalTime > 0 then
+            -- Send the raw remaining seconds
+            table.insert(parts, RAIDS[i].short .. ":" .. math.floor(personalTime))
         end
     end
     if table.getn(parts) == 0 then
@@ -359,13 +359,14 @@ local function ParseLockoutMessage(sender, message)
         end
     end
 
-    -- If they have no lockouts, save and return
     if payload == "NONE" then
         SaveGuildData()
         return
     end
 
-    -- Parse comma-separated "SHORT:EXPIRY" pairs
+    local now = time()
+
+    -- Parse comma-separated "SHORT:REMAINING_SECONDS" pairs
     local start = 1
     while true do
         local commaPos = string.find(payload, ",", start, true)
@@ -377,21 +378,15 @@ local function ParseLockoutMessage(sender, message)
             token = string.sub(payload, start)
         end
         if token and token ~= "" then
-            -- Split on ":"
             local colonPos = string.find(token, ":", 1, true)
             if colonPos then
                 local raidShort = string.sub(token, 1, colonPos - 1)
-                local expiryStr = string.sub(token, colonPos + 1)
-                local expiry = tonumber(expiryStr)
+                local remainStr = string.sub(token, colonPos + 1)
+                local remainSec = tonumber(remainStr)
                 local key = string.lower(raidShort)
-                if guildLockouts[key] and expiry and expiry > time() then
-                    guildLockouts[key][sender] = expiry
-                end
-            else
-                -- Legacy format without expiry: treat as locked until next likely reset
-                local key = string.lower(token)
-                if guildLockouts[key] then
-                    guildLockouts[key][sender] = time() + CYCLE_7DAY
+                if guildLockouts[key] and remainSec and remainSec > 0 then
+                    -- Convert to absolute expiry: now + remaining
+                    guildLockouts[key][sender] = now + remainSec
                 end
             end
         end
