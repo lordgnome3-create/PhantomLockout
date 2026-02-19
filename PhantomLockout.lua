@@ -1076,16 +1076,16 @@ boot:SetScript("OnEvent", function()
 
         -- Slash commands
         SLASH_PHANTOMLOCKOUT1 = "/phantomlockout"
-        SLASH_PHANTOMLOCKOUT2 = "/pl"
+        SLASH_PHANTOMLOCKOUT2 = "/plockout"
         SLASH_PHANTOMLOCKOUT3 = "/plock"
         SlashCmdList["PHANTOMLOCKOUT"] = function(msg)
             if msg == "help" then
                 DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r Commands:")
-                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl|r - Toggle the lockout window")
-                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl help|r - Show this help")
-                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl next|r - Show resets in chat")
-                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl reset|r - Reset dungeon instances")
-                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/pl guild|r - Show guild lockout summary")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout|r - Toggle the lockout window")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout help|r - Show this help")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout next|r - Show resets in chat")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout reset|r - Reset dungeon instances")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout guild|r - Show guild lockout summary")
             elseif msg == "next" then
                 DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Upcoming Resets:")
                 for i = 1, table.getn(RAIDS) do
@@ -1137,7 +1137,7 @@ boot:SetScript("OnEvent", function()
             end
         end
 
-        DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r v1.1 loaded. Type |cffffd100/pl|r to toggle. Guild sync enabled.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r v1.1 loaded. Type |cffffd100/plockout|r to toggle. Guild sync enabled.")
 
     elseif event == "UPDATE_INSTANCE_INFO" then
         RefreshSavedInstances()
