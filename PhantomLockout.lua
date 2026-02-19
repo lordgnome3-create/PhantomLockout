@@ -595,25 +595,20 @@ local function BuildMOTDFrame()
 
     -- Admin controls (only visible to admins)
     if IsPlayerAdmin() then
-        -- Edit box
-        local editScrollFrame = CreateFrame("ScrollFrame", "PhantomLockoutMOTDScroll", mf, "UIPanelScrollFrameTemplate")
-        editScrollFrame:SetWidth(340)
-        editScrollFrame:SetHeight(130)
-        editScrollFrame:SetPoint("TOPLEFT", msgBg, "TOPLEFT", 5, -5)
+        -- Hide the static text when admin
+        mf.messageText:Hide()
 
-        local editBox = CreateFrame("EditBox", "PhantomLockoutMOTDEditBox", editScrollFrame)
-        editBox:SetWidth(320)
-        editBox:SetHeight(120)
+        -- Simple multiline edit box directly inside msgBg
+        local editBox = CreateFrame("EditBox", "PhantomLockoutMOTDEditBox", msgBg)
+        editBox:SetPoint("TOPLEFT", msgBg, "TOPLEFT", 10, -8)
+        editBox:SetPoint("BOTTOMRIGHT", msgBg, "BOTTOMRIGHT", -10, 8)
         editBox:SetMultiLine(true)
         editBox:SetAutoFocus(false)
-        editBox:SetFontObject(GameFontNormal)
+        editBox:SetFontObject(GameFontHighlight)
         editBox:SetTextColor(1, 1, 1)
         editBox:SetText(guildMOTD or "")
         editBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
-        editScrollFrame:SetScrollChild(editBox)
-
-        -- Hide the static text when admin
-        mf.messageText:Hide()
+        editBox:EnableMouse(true)
 
         mf.editBox = editBox
 
