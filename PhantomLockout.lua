@@ -155,13 +155,16 @@ local resetBtn = nil
 local sepLine = nil
 local hdrFrame = nil
 
--- Personal lockout tracking
+-- Personal lockout tracking.
+-- savedLockouts[lowerName] = array of { expiry=epoch, remaining=seconds_at_scan }
+-- Using an array per key to handle cases where two instances share the same name
+-- (e.g. Karazhan 40-man and 10-man may both appear as "karazhan" from the API).
 local savedLockouts = {}
 
 -- Guild lockout tracking: guildLockouts[raidShortLower] = { ["PlayerName"] = expiryEpoch, ... }
 local guildLockouts = {}
 
--- Track all guild members who have the addon installed (anyone who sends a message)
+-- Track all guild members who have the addon installed (anyone who sends any message)
 local addonUsers = {}  -- ["PlayerName"] = lastSeenEpoch
 
 -- Guild MOTD (message of the day) - shared message editable by admins only
@@ -277,7 +280,9 @@ end
 -- PERSONAL LOCKOUT DETECTION
 ----------------------------------------------------------------------
 
--- savedLockouts[lowerName] = absolute expiry time (epoch)
+-- savedLockouts[lowerName] = array of { expiry=absoluteEpoch, remaining=secondsAtScanTime }
+-- Storing as an array per key lets us handle duplicate instance names (e.g. both Karazhan
+-- variants returning "karazhan" from GetSavedInstanceInfo).
 local function RefreshSavedInstances()
     savedLockouts = {}
     local num = GetNumSavedInstances()
@@ -286,33 +291,84 @@ local function RefreshSavedInstances()
     for i = 1, num do
         local name, id, resetTime = GetSavedInstanceInfo(i)
         if name and resetTime and resetTime > 0 then
-            -- Store the absolute epoch when lockout expires
-            savedLockouts[string.lower(name)] = now + resetTime
+            local key = string.lower(name)
+            if not savedLockouts[key] then
+                savedLockouts[key] = {}
+            end
+            table.insert(savedLockouts[key], {
+                expiry    = now + resetTime,
+                remaining = resetTime,
+            })
         end
     end
+end
+
+-- Look up a lockout entry for a given name key.
+-- For raids that share an ambiguous name (both Karazhan variants), we disambiguate
+-- by comparing the stored remaining time against the raid's cycle length:
+--   - If remaining > CYCLE_3DAY the lockout must be from a 5-day instance.
+--   - If remaining <= CYCLE_3DAY it could be either; we prefer the 3-day raid.
+-- Falls back to the first valid entry when only one exists or the cycle is unambiguous.
+local function FindLockoutEntry(nameKey, raidCycle)
+    local entries = savedLockouts[nameKey]
+    if not entries then return nil end
+    local now = time()
+
+    -- If there's only one entry, return it if still valid
+    if table.getn(entries) == 1 then
+        local e = entries[1]
+        if e.expiry > now then return e end
+        return nil
+    end
+
+    -- Multiple entries (two Karazhan sizes): match by cycle fit
+    -- First pass: look for an entry whose remaining time fits this cycle exclusively
+    for i = 1, table.getn(entries) do
+        local e = entries[i]
+        if e.expiry > now then
+            if raidCycle == CYCLE_5DAY and e.remaining > CYCLE_3DAY then
+                -- Remaining > 3 days means it cannot be a 3-day lockout
+                return e
+            elseif raidCycle == CYCLE_3DAY and e.remaining <= CYCLE_3DAY then
+                return e
+            end
+        end
+    end
+
+    -- Second pass: any valid entry (fallback for edge-case timings)
+    for i = 1, table.getn(entries) do
+        local e = entries[i]
+        if e.expiry > now then return e end
+    end
+
+    return nil
 end
 
 -- Returns isLocked (bool), secondsRemaining (number or nil)
 local function IsPlayerLocked(raid)
     local now = time()
 
-    local expiry = savedLockouts[string.lower(raid.name)]
-    if expiry and expiry > now then
-        return true, expiry - now
+    -- 1. Check exact raid name match
+    local entry = FindLockoutEntry(string.lower(raid.name), raid.cycle)
+    if entry then
+        return true, entry.expiry - now
     end
 
-    expiry = savedLockouts[string.lower(raid.short)]
-    if expiry and expiry > now then
-        return true, expiry - now
+    -- 2. Check short name match
+    entry = FindLockoutEntry(string.lower(raid.short), raid.cycle)
+    if entry then
+        return true, entry.expiry - now
     end
 
-    -- Handle Karazhan variants matching just "karazhan"
+    -- 3. Karazhan-specific: the game may return "karazhan" for both 40-man and 10-man.
+    --    Use FindLockoutEntry with the raid's cycle so each variant claims the right entry.
     if string.find(string.lower(raid.name), "karazhan") then
-        expiry = savedLockouts["karazhan"]
-        if expiry and expiry > now then
-            return true, expiry - now
+        entry = FindLockoutEntry("karazhan", raid.cycle)
+        if entry then
+            return true, entry.expiry - now
         end
     end
+
     return false, nil
 end
 
@@ -359,6 +415,13 @@ local function BroadcastLockouts()
     if not IsInGuild() then return end
     local msg = "LOCKOUTS:" .. BuildLockoutMessage()
     SendAddonMessage(ADDON_PREFIX, msg, "GUILD")
+end
+
+-- Broadcast a HELLO presence ping so other addon users can discover us immediately
+-- upon login rather than waiting up to 60 seconds for the next lockout broadcast.
+local function BroadcastHello()
+    if not IsInGuild() then return end
+    SendAddonMessage(ADDON_PREFIX, "HELLO", "GUILD")
 end
 
 -- Parse incoming lockout message from a guild member
@@ -414,6 +477,16 @@ local function ParseLockoutMessage(sender, message)
     end
 
     SaveGuildData()
+end
+
+-- Handle a HELLO presence message from another addon user.
+-- Record them as an addon user and immediately reply with our own lockouts
+-- so they get fresh data without waiting for the next periodic broadcast.
+local function ParseHelloMessage(sender)
+    addonUsers[sender] = time()
+    SaveGuildData()
+    -- Reply with our lockouts so the joining player sees everyone's data right away
+    BroadcastLockouts()
 end
 
 -- Get list of guild members locked to a specific raid (with valid expiry)
@@ -1284,6 +1357,8 @@ local broadcastElapsed = 0
 local pruneElapsed = 0
 local motdBroadcastDelay = 0
 local motdBroadcasted = false
+local startupDelay = 0
+local startupDone = false
 local BROADCAST_INTERVAL = 60
 local PRUNE_INTERVAL = 300  -- prune expired guild data every 5 minutes
 
@@ -1291,6 +1366,18 @@ local function OnTick()
     updateElapsed = updateElapsed + arg1
     broadcastElapsed = broadcastElapsed + arg1
     pruneElapsed = pruneElapsed + arg1
+
+    -- Startup sequence: after 5 seconds send HELLO then lockouts.
+    -- HELLO tells all online addon users that we exist so they record us in addonUsers
+    -- and immediately reply with their own lockouts (via ParseHelloMessage).
+    if not startupDone then
+        startupDelay = startupDelay + arg1
+        if startupDelay >= 5 then
+            startupDone = true
+            BroadcastHello()
+            BroadcastLockouts()
+        end
+    end
 
     -- One-time delayed MOTD broadcast for admins on login
     if not motdBroadcasted then
@@ -1426,7 +1513,7 @@ boot:SetScript("OnEvent", function()
             end
         end
 
-        DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r v1.1 loaded. Type |cffffd100/plockout|r to toggle. Guild sync enabled.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r v1.2 loaded. Type |cffffd100/plockout|r to toggle. Guild sync enabled.")
 
     elseif event == "UPDATE_INSTANCE_INFO" then
         RefreshSavedInstances()
@@ -1441,8 +1528,12 @@ boot:SetScript("OnEvent", function()
         if arg1 == ADDON_PREFIX and arg3 == "GUILD" then
             local myName = UnitName("player")
             if arg4 and arg4 ~= myName then
-                -- Check if it's a MOTD message
-                if arg2 and string.sub(arg2, 1, 5) == "MOTD:" then
+                if arg2 == "HELLO" then
+                    -- A guild member with the addon just logged in.
+                    -- Record them and reply with our lockouts immediately.
+                    ParseHelloMessage(arg4)
+                    UpdateRows()
+                elseif arg2 and string.sub(arg2, 1, 5) == "MOTD:" then
                     ParseMOTDMessage(arg4, arg2)
                 else
                     ParseLockoutMessage(arg4, arg2)
