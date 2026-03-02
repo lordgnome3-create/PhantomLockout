@@ -225,25 +225,44 @@ end
 ----------------------------------------------------------------------
 
 local function GetSecondsUntilReset(raid)
-    -- Pure epoch-based modulo for ALL raid types.
-    -- Weekly anchor: Wed Jan 8, 2025 04:00 UTC = Tue Jan 7, 2025 23:00 EST
-    -- This is a known 40-man weekly reset point.
-    local WEEKLY_ANCHOR = 1736308800
+    local serverHour, serverMin = GetGameTime()
+    local serverSecsToday = serverHour * 3600 + serverMin * 60
 
-    local anchor
     if raid.cycle == CYCLE_7DAY then
-        anchor = WEEKLY_ANCHOR
-    else
-        anchor = raid.anchor
-    end
+        -- Weekly reset: Tuesday 23:00 server time.
+        -- Use GetGameTime() for server hour/minute to avoid UTC vs local-time() skew.
+        -- Derive server weekday from local weekday, adjusting if server and local clocks
+        -- are on different calendar days (detected via >12 hour difference).
+        local localHour = tonumber(date("%H"))
+        local localWday = tonumber(date("%w"))  -- 0=Sun, 1=Mon, 2=Tue, ... 6=Sat
 
-    local now = time()
-    local elapsed = now - anchor
-    if elapsed < 0 then
-        return raid.cycle
+        local serverWday = localWday
+        local hourDiff   = serverHour - localHour
+        if hourDiff > 12 then
+            serverWday = math.mod(serverWday - 1 + 7, 7)   -- server is a day behind
+        elseif hourDiff < -12 then
+            serverWday = math.mod(serverWday + 1, 7)        -- server is a day ahead
+        end
+
+        local RESET_WDAY       = 2      -- Tuesday  (0=Sun … 6=Sat)
+        local RESET_SEC_IN_DAY = 23 * 3600  -- 23:00 server time
+
+        local daysUntil = math.mod(RESET_WDAY - serverWday + 7, 7)
+        if daysUntil == 0 and serverSecsToday >= RESET_SEC_IN_DAY then
+            daysUntil = 7   -- today IS Tuesday but reset already happened; next one in 7 days
+        end
+
+        return daysUntil * 86400 + (RESET_SEC_IN_DAY - serverSecsToday)
+    else
+        -- Rolling cycle (3-day / 5-day): epoch-anchor modulo.
+        -- NOTE: time() in WoW returns local machine time, so anchors below must be
+        -- expressed as local-time Unix epoch at the moment of a known reset.
+        local now     = time()
+        local elapsed = now - raid.anchor
+        if elapsed < 0 then return raid.cycle end
+        local inCycle = math.mod(elapsed, raid.cycle)
+        return raid.cycle - inCycle
     end
-    local inCycle = math.mod(elapsed, raid.cycle)
-    return raid.cycle - inCycle
 end
 
 local function FormatCountdown(seconds)
@@ -304,43 +323,38 @@ local function RefreshSavedInstances()
 end
 
 -- Look up a lockout entry for a given name key.
--- For raids that share an ambiguous name (both Karazhan variants), we disambiguate
--- by comparing the stored remaining time against the raid's cycle length:
---   - If remaining > CYCLE_3DAY the lockout must be from a 5-day instance.
---   - If remaining <= CYCLE_3DAY it could be either; we prefer the 3-day raid.
--- Falls back to the first valid entry when only one exists or the cycle is unambiguous.
+-- For Karazhan the game may return the same name ("karazhan") for both the 40-man
+-- (5-day cycle) and the 10-man (3-day cycle).  We always disambiguate by comparing
+-- the stored remaining time against the cycle length — even when only one entry
+-- exists — so a Kara10 lockout never leaks into the Kara40 row and vice-versa.
 local function FindLockoutEntry(nameKey, raidCycle)
     local entries = savedLockouts[nameKey]
     if not entries then return nil end
     local now = time()
 
-    -- If there's only one entry, return it if still valid
-    if table.getn(entries) == 1 then
-        local e = entries[1]
-        if e.expiry > now then return e end
+    -- For 5-day vs 3-day cycles, ALWAYS use remaining-time discrimination.
+    -- A 3-day lockout can hold at most CYCLE_3DAY seconds; a 5-day lockout will
+    -- exceed that.  This correctly handles both the single-entry and multi-entry cases.
+    if raidCycle == CYCLE_5DAY or raidCycle == CYCLE_3DAY then
+        for i = 1, table.getn(entries) do
+            local e = entries[i]
+            if e.expiry > now then
+                if raidCycle == CYCLE_5DAY and e.remaining > CYCLE_3DAY then
+                    return e   -- only a 5-day lock can have > 3 days left
+                elseif raidCycle == CYCLE_3DAY and e.remaining <= CYCLE_3DAY then
+                    return e   -- fits within a 3-day window
+                end
+            end
+        end
+        -- No discriminated match — do NOT fall back to avoid cross-contamination.
         return nil
     end
 
-    -- Multiple entries (two Karazhan sizes): match by cycle fit
-    -- First pass: look for an entry whose remaining time fits this cycle exclusively
-    for i = 1, table.getn(entries) do
-        local e = entries[i]
-        if e.expiry > now then
-            if raidCycle == CYCLE_5DAY and e.remaining > CYCLE_3DAY then
-                -- Remaining > 3 days means it cannot be a 3-day lockout
-                return e
-            elseif raidCycle == CYCLE_3DAY and e.remaining <= CYCLE_3DAY then
-                return e
-            end
-        end
-    end
-
-    -- Second pass: any valid entry (fallback for edge-case timings)
+    -- 7-day and other cycles: return first valid entry (no ambiguity).
     for i = 1, table.getn(entries) do
         local e = entries[i]
         if e.expiry > now then return e end
     end
-
     return nil
 end
 
@@ -360,12 +374,18 @@ local function IsPlayerLocked(raid)
         return true, entry.expiry - now
     end
 
-    -- 3. Karazhan-specific: the game may return "karazhan" for both 40-man and 10-man.
-    --    Use FindLockoutEntry with the raid's cycle so each variant claims the right entry.
+    -- 3. Karazhan-specific: the server may return various name strings for either
+    --    variant ("Karazhan", "Karazhan (10-player)", etc.).  Scan every saved key
+    --    that contains "karazhan" and pick the one whose remaining time fits this
+    --    raid's cycle (cycle discrimination is enforced inside FindLockoutEntry).
     if string.find(string.lower(raid.name), "karazhan") then
-        entry = FindLockoutEntry("karazhan", raid.cycle)
-        if entry then
-            return true, entry.expiry - now
+        for key, _ in pairs(savedLockouts) do
+            if string.find(key, "karazhan") then
+                entry = FindLockoutEntry(key, raid.cycle)
+                if entry then
+                    return true, entry.expiry - now
+                end
+            end
         end
     end
 
