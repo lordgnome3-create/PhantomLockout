@@ -140,9 +140,9 @@ local HEADER_TOP = 78
 local INFO_HEIGHT = 55
 local INFO_BOTTOM = 15
 local RESET_BTN_BOTTOM = 75
-local MIN_WIDTH = 680
+local MIN_WIDTH = 820
 local MIN_HEIGHT = 300
-local DEFAULT_WIDTH = 740
+local DEFAULT_WIDTH = 880
 local DEFAULT_HEIGHT = 470
 
 local selectedRaid = nil
@@ -899,6 +899,12 @@ local function CreateRow(parent, index)
     row.guildText:SetWidth(160)
     row.guildText:SetJustifyH("LEFT")
 
+    -- Next Reset column: always-on countdown to the next global reset
+    row.nextResetText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    row.nextResetText:SetPoint("LEFT", row, "LEFT", 690, 0)
+    row.nextResetText:SetWidth(110)
+    row.nextResetText:SetJustifyH("LEFT")
+
     -- Register both mouse buttons
     row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
@@ -1068,6 +1074,10 @@ local function UpdateRows()
             row.guildText:SetText("|cff555555--|r")
         end
 
+        -- Next Reset column: always show the global cycle countdown
+        local globalReset = GetSecondsUntilReset(raid)
+        row.nextResetText:SetText("|cff88ccff" .. FormatCountdown(globalReset) .. "|r")
+
         if i == selectedRaid then
             row.selected:Show()
         else
@@ -1191,6 +1201,7 @@ local function BuildMainFrame()
     MakeHeader(hdrFrame, "Status", 315, 80)
     MakeHeader(hdrFrame, "Resets In", 400, 110)
     MakeHeader(hdrFrame, "Guild Lockouts", 520, 160)
+    MakeHeader(hdrFrame, "Next Reset", 690, 110)
 
     -- Separator under headers
     local sep2 = f:CreateTexture(nil, "ARTWORK")
