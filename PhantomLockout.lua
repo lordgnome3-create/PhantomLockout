@@ -1094,9 +1094,8 @@ local function UpdateRows()
             row.guildText:SetText("|cff555555--|r")
         end
 
-        -- Next Reset column: always show the global cycle countdown
-        local globalReset = GetSecondsUntilReset(raid)
-        row.nextResetText:SetText("|cff88ccff" .. FormatCountdown(globalReset) .. "|r")
+        -- Next Reset column: same countdown as "Resets In" but always visible
+        row.nextResetText:SetText("|cffff8833" .. FormatCountdown(remaining) .. "|r")
 
         if i == selectedRaid then
             row.selected:Show()
