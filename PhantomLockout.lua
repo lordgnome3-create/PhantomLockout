@@ -299,6 +299,22 @@ end
 -- PERSONAL LOCKOUT DETECTION
 ----------------------------------------------------------------------
 
+-- Normalize a lockout key: lowercase, collapse whitespace, strip all apostrophe
+-- variants (straight ', curly \xe2\x80\x99, backtick, etc.) so that names like
+-- "Temple of Ahn'Qiraj" and "Temple of Ahn\u2019Qiraj" resolve to the same key.
+local function NormalizeKey(s)
+    if not s then return "" end
+    s = string.lower(s)
+    -- strip straight apostrophe, backtick, and the two-byte sequence \xe2\x80\x99
+    -- (UTF-8 right single quotation mark U+2019) which the game client may use
+    s = string.gsub(s, "'",  "")
+    s = string.gsub(s, "`",  "")
+    s = string.gsub(s, "\xe2\x80\x99", "")
+    -- collapse multiple spaces
+    s = string.gsub(s, "%s+", " ")
+    return s
+end
+
 -- savedLockouts[lowerName] = array of { expiry=absoluteEpoch, remaining=secondsAtScanTime }
 -- Storing as an array per key lets us handle duplicate instance names (e.g. both Karazhan
 -- variants returning "karazhan" from GetSavedInstanceInfo).
@@ -320,22 +336,6 @@ local function RefreshSavedInstances()
             })
         end
     end
-end
-
--- Normalize a lockout key: lowercase, collapse whitespace, strip all apostrophe
--- variants (straight ', curly \xe2\x80\x99, backtick, etc.) so that names like
--- "Temple of Ahn'Qiraj" and "Temple of Ahn\u2019Qiraj" resolve to the same key.
-local function NormalizeKey(s)
-    if not s then return "" end
-    s = string.lower(s)
-    -- strip straight apostrophe, backtick, and the two-byte sequence \xe2\x80\x99
-    -- (UTF-8 right single quotation mark U+2019) which the game client may use
-    s = string.gsub(s, "'",  "")
-    s = string.gsub(s, "`",  "")
-    s = string.gsub(s, "\xe2\x80\x99", "")
-    -- collapse multiple spaces
-    s = string.gsub(s, "%s+", " ")
-    return s
 end
 -- For Karazhan the game may return the same name ("karazhan") for both the 40-man
 -- (5-day cycle) and the 10-man (3-day cycle).  We always disambiguate by comparing
