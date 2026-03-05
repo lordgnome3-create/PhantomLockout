@@ -388,14 +388,21 @@ local function IsPlayerLocked(raid)
         return true, entry.expiry - now
     end
 
-    -- 3. Karazhan-specific: scan all saved keys containing "karazhan" (normalized).
-    if string.find(NormalizeKey(raid.name), "karazhan") then
-        for key, _ in pairs(savedLockouts) do
-            if string.find(key, "karazhan") then
-                entry = FindLockoutEntry(key, raid.cycle)
-                if entry then
-                    return true, entry.expiry - now
-                end
+    -- 3. Fuzzy scan: the game sometimes returns a different name than what is stored
+    --    in the RAIDS table (e.g. "Ahn'Qiraj" instead of "Temple of Ahn'Qiraj", or
+    --    uses a different apostrophe encoding).  Scan every saved key and check whether
+    --    it contains a meaningful word from the raid's normalized name, or vice-versa.
+    local normName  = NormalizeKey(raid.name)
+    local normShort = NormalizeKey(raid.short)
+    for key, _ in pairs(savedLockouts) do
+        -- key contains the raid name OR raid name contains the key (substring match)
+        local keyMatch = string.find(normName, key, 1, true) or
+                         string.find(key, normName, 1, true) or
+                         string.find(key, normShort, 1, true)
+        if keyMatch then
+            entry = FindLockoutEntry(key, raid.cycle)
+            if entry then
+                return true, entry.expiry - now
             end
         end
     end
@@ -1502,7 +1509,22 @@ boot:SetScript("OnEvent", function()
                 DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout next|r - Show resets in chat")
                 DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout reset|r - Reset dungeon instances")
                 DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout guild|r - Show guild lockout summary")
+                DEFAULT_CHAT_FRAME:AddMessage("  |cffffd100/plockout debug|r - Dump raw saved instance names")
                 DEFAULT_CHAT_FRAME:AddMessage("  |cff888888Right-click a raid to invite all available guild members with addon.|r")
+            elseif msg == "debug" then
+                DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Raw saved instances from server:")
+                local num = GetNumSavedInstances()
+                if not num or num == 0 then
+                    DEFAULT_CHAT_FRAME:AddMessage("  |cff888888None found.|r")
+                else
+                    for i = 1, num do
+                        local name, id, resetTime = GetSavedInstanceInfo(i)
+                        local normalized = NormalizeKey(name or "")
+                        DEFAULT_CHAT_FRAME:AddMessage(string.format(
+                            "  [%d] raw=|cffffd100%s|r  normalized=|cffaaffaa%s|r  resets=%ds",
+                            i, tostring(name), normalized, resetTime or 0))
+                    end
+                end
             elseif msg == "next" then
                 DEFAULT_CHAT_FRAME:AddMessage("|cff8800ffPhantom|r|cffcc44ffLockout|r - Upcoming Resets:")
                 for i = 1, table.getn(RAIDS) do
