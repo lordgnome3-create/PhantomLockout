@@ -310,7 +310,7 @@ local function RefreshSavedInstances()
     for i = 1, num do
         local name, id, resetTime = GetSavedInstanceInfo(i)
         if name and resetTime and resetTime > 0 then
-            local key = string.lower(name)
+            local key = NormalizeKey(name)
             if not savedLockouts[key] then
                 savedLockouts[key] = {}
             end
@@ -322,7 +322,21 @@ local function RefreshSavedInstances()
     end
 end
 
--- Look up a lockout entry for a given name key.
+-- Normalize a lockout key: lowercase, collapse whitespace, strip all apostrophe
+-- variants (straight ', curly \xe2\x80\x99, backtick, etc.) so that names like
+-- "Temple of Ahn'Qiraj" and "Temple of Ahn\u2019Qiraj" resolve to the same key.
+local function NormalizeKey(s)
+    if not s then return "" end
+    s = string.lower(s)
+    -- strip straight apostrophe, backtick, and the two-byte sequence \xe2\x80\x99
+    -- (UTF-8 right single quotation mark U+2019) which the game client may use
+    s = string.gsub(s, "'",  "")
+    s = string.gsub(s, "`",  "")
+    s = string.gsub(s, "\xe2\x80\x99", "")
+    -- collapse multiple spaces
+    s = string.gsub(s, "%s+", " ")
+    return s
+end
 -- For Karazhan the game may return the same name ("karazhan") for both the 40-man
 -- (5-day cycle) and the 10-man (3-day cycle).  We always disambiguate by comparing
 -- the stored remaining time against the cycle length — even when only one entry
@@ -363,22 +377,19 @@ local function IsPlayerLocked(raid)
     local now = time()
 
     -- 1. Check exact raid name match
-    local entry = FindLockoutEntry(string.lower(raid.name), raid.cycle)
+    local entry = FindLockoutEntry(NormalizeKey(raid.name), raid.cycle)
     if entry then
         return true, entry.expiry - now
     end
 
     -- 2. Check short name match
-    entry = FindLockoutEntry(string.lower(raid.short), raid.cycle)
+    entry = FindLockoutEntry(NormalizeKey(raid.short), raid.cycle)
     if entry then
         return true, entry.expiry - now
     end
 
-    -- 3. Karazhan-specific: the server may return various name strings for either
-    --    variant ("Karazhan", "Karazhan (10-player)", etc.).  Scan every saved key
-    --    that contains "karazhan" and pick the one whose remaining time fits this
-    --    raid's cycle (cycle discrimination is enforced inside FindLockoutEntry).
-    if string.find(string.lower(raid.name), "karazhan") then
+    -- 3. Karazhan-specific: scan all saved keys containing "karazhan" (normalized).
+    if string.find(NormalizeKey(raid.name), "karazhan") then
         for key, _ in pairs(savedLockouts) do
             if string.find(key, "karazhan") then
                 entry = FindLockoutEntry(key, raid.cycle)
