@@ -52,6 +52,7 @@ local RAIDS = {
     {
         name = "Temple of Ahn'Qiraj",
         short = "AQ40",
+        aliases = { "Ahn'Qiraj Temple", "AhnQiraj Temple" },
         size = 40,
         cycle = CYCLE_7DAY,
         anchor = 0, -- weekly: computed from day-of-week
@@ -388,14 +389,20 @@ local function IsPlayerLocked(raid)
         return true, entry.expiry - now
     end
 
-    -- 3. Fuzzy scan: the game sometimes returns a different name than what is stored
-    --    in the RAIDS table (e.g. "Ahn'Qiraj" instead of "Temple of Ahn'Qiraj", or
-    --    uses a different apostrophe encoding).  Scan every saved key and check whether
-    --    it contains a meaningful word from the raid's normalized name, or vice-versa.
+    -- 3. Check explicit aliases (for raids where the game returns a different name)
+    if raid.aliases then
+        for i = 1, table.getn(raid.aliases) do
+            entry = FindLockoutEntry(NormalizeKey(raid.aliases[i]), raid.cycle)
+            if entry then
+                return true, entry.expiry - now
+            end
+        end
+    end
+
+    -- 4. Fuzzy scan: substring match between saved keys and normalized raid name/short.
     local normName  = NormalizeKey(raid.name)
     local normShort = NormalizeKey(raid.short)
     for key, _ in pairs(savedLockouts) do
-        -- key contains the raid name OR raid name contains the key (substring match)
         local keyMatch = string.find(normName, key, 1, true) or
                          string.find(key, normName, 1, true) or
                          string.find(key, normShort, 1, true)
