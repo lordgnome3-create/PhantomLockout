@@ -104,7 +104,7 @@ local RAIDS = {
     {
         name = "Karazhan (10)",
         short = "Kara10",
-        aliases = { "Lower Karazhan", "Upper Karazhan", "Karazhan - Lower", "Karazhan - Upper", "Karazhan (10-player)" },
+        aliases = { "Lower Karazhan", "Upper Karazhan", "Lower Karazhan Halls", "Upper Karazhan Halls", "Karazhan - Lower", "Karazhan - Upper", "Karazhan (10-player)" },
         size = 10,
         cycle = CYCLE_3DAY,
         anchor = ANCHOR_RAID20,
