@@ -881,36 +881,35 @@ end
 -- RAID MEMBER POPUP (scrollable, replaces GameTooltip)
 ----------------------------------------------------------------------
 
-local raidPopup        = nil   -- the popup frame (built once, reused)
-local popupRaid        = nil   -- raid currently shown
-local popupAnchor      = nil   -- row frame the popup is anchored to
+local POPUP_W            = 290
+local POPUP_PAD          = 12
+local POPUP_NAME_W       = 165
+local POPUP_TIMER_W      = 95
+local MEMBER_ROW_H       = 16
+local POPUP_VISIBLE_ROWS = 12
+local POPUP_HEADER_H     = 82   -- pixels from top of frame to where rows start
+local POPUP_FOOTER_H     = 28   -- pixels below the last visible row
+
+local raidPopup        = nil
+local popupRaid        = nil
+local popupAnchor      = nil
+local popupScrollOffset = 0     -- index of first visible row (0-based)
+local popupTotalRows   = 0
 local popupHideTimer   = 0
 local popupHidePending = false
-local POPUP_HIDE_DELAY = 0.3  -- seconds after mouse leaves before hiding
-local MEMBER_ROW_H    = 18
-local POPUP_VISIBLE_ROWS = 12 -- max visible member rows before scroll kicks in
+local POPUP_HIDE_DELAY = 0.25
 
--- Reusable pool of member row fontstrings inside the scroll child
-local memberRowPool = {}
-
-local function GetOrCreateMemberRow(scrollChild, idx)
-    if not memberRowPool[idx] then
-        local nameFS = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        nameFS:SetWidth(140)
-        nameFS:SetJustifyH("LEFT")
-        local timerFS = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        timerFS:SetWidth(90)
-        timerFS:SetJustifyH("RIGHT")
-        memberRowPool[idx] = { nameFS = nameFS, timerFS = timerFS }
-    end
-    return memberRowPool[idx]
-end
+-- Pre-created row frames (up to 30 member rows)
+local MAX_POOL = 30
+local rowPool  = {}   -- array of { frame, nameFS, timerFS }
 
 local function BuildRaidPopup()
     local f = CreateFrame("Frame", "PhantomLockoutRaidPopup", UIParent)
-    f:SetWidth(280)
+    f:SetWidth(POPUP_W)
+    f:SetHeight(200)
     f:SetFrameStrata("TOOLTIP")
     f:EnableMouse(true)
+    f:EnableMouseWheel(true)
     f:SetBackdrop({
         bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
         edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border",
@@ -918,86 +917,149 @@ local function BuildRaidPopup()
         insets = { left = 8, right = 9, top = 9, bottom = 8 },
     })
     f:SetBackdropColor(0.08, 0.08, 0.12, 0.97)
-
     f:SetScript("OnEnter", function() popupHidePending = false end)
     f:SetScript("OnLeave", function() SchedulePopupHide() end)
+    f:SetScript("OnMouseWheel", function()
+        local dir = arg1  -- +1 scroll up, -1 scroll down
+        popupScrollOffset = popupScrollOffset - dir
+        if popupScrollOffset < 0 then popupScrollOffset = 0 end
+        local maxOff = popupTotalRows - POPUP_VISIBLE_ROWS
+        if maxOff < 0 then maxOff = 0 end
+        if popupScrollOffset > maxOff then popupScrollOffset = maxOff end
+        RefreshPopupRows()
+    end)
 
     -- Title
     f.titleText = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    f.titleText:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -12)
-    f.titleText:SetPoint("TOPRIGHT", f, "TOPRIGHT", -12, -12)
+    f.titleText:SetPoint("TOPLEFT", f, "TOPLEFT", POPUP_PAD, -12)
+    f.titleText:SetWidth(POPUP_W - POPUP_PAD * 2)
     f.titleText:SetJustifyH("LEFT")
 
-    -- Separator
-    f.sep = f:CreateTexture(nil, "ARTWORK")
-    f.sep:SetTexture(1, 1, 1, 0.12)
-    f.sep:SetHeight(1)
-    f.sep:SetPoint("TOPLEFT",  f, "TOPLEFT",  10, -30)
-    f.sep:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -30)
+    -- Separator 1
+    local sep1 = f:CreateTexture(nil, "ARTWORK")
+    sep1:SetTexture(1, 1, 1, 0.15)
+    sep1:SetHeight(1)
+    sep1:SetPoint("TOPLEFT",  f, "TOPLEFT",  10, -31)
+    sep1:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -31)
 
     -- Your status line
     f.myStatusText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    f.myStatusText:SetPoint("TOPLEFT", f.sep, "BOTTOMLEFT", 0, -6)
-    f.myStatusText:SetPoint("TOPRIGHT", f.sep, "BOTTOMRIGHT", 0, -6)
+    f.myStatusText:SetPoint("TOPLEFT", f, "TOPLEFT", POPUP_PAD, -38)
+    f.myStatusText:SetWidth(POPUP_W - POPUP_PAD * 2)
     f.myStatusText:SetJustifyH("LEFT")
 
-    -- Second separator
-    f.sep2 = f:CreateTexture(nil, "ARTWORK")
-    f.sep2:SetTexture(1, 1, 1, 0.08)
-    f.sep2:SetHeight(1)
-    f.sep2:SetPoint("TOPLEFT",  f.myStatusText, "BOTTOMLEFT",  0, -5)
-    f.sep2:SetPoint("TOPRIGHT", f.myStatusText, "BOTTOMRIGHT", 0, -5)
+    -- Separator 2
+    local sep2 = f:CreateTexture(nil, "ARTWORK")
+    sep2:SetTexture(1, 1, 1, 0.08)
+    sep2:SetHeight(1)
+    sep2:SetPoint("TOPLEFT",  f, "TOPLEFT",  10, -56)
+    sep2:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -56)
 
-    -- Column headers for member list
-    f.colName  = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    f.colName:SetPoint("TOPLEFT", f.sep2, "BOTTOMLEFT", 2, -4)
-    f.colName:SetWidth(140)
-    f.colName:SetJustifyH("LEFT")
-    f.colName:SetText("|cffffd100Member|r")
+    -- Column headers
+    local colName = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    colName:SetPoint("TOPLEFT", f, "TOPLEFT", POPUP_PAD, -62)
+    colName:SetWidth(POPUP_NAME_W)
+    colName:SetJustifyH("LEFT")
+    colName:SetText("|cffffd100Member|r")
 
-    f.colStatus = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    f.colStatus:SetPoint("TOPRIGHT", f, "TOPRIGHT", -12, 0)
-    f.colStatus:SetPoint("TOP", f.colName, "TOP")
-    f.colStatus:SetWidth(90)
-    f.colStatus:SetJustifyH("RIGHT")
-    f.colStatus:SetText("|cffffd100Status / Timer|r")
+    local colTimer = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    colTimer:SetPoint("TOPLEFT", f, "TOPLEFT", POPUP_PAD + POPUP_NAME_W, -62)
+    colTimer:SetWidth(POPUP_TIMER_W)
+    colTimer:SetJustifyH("RIGHT")
+    colTimer:SetText("|cffffd100Status / Timer|r")
 
-    -- Scroll frame
-    f.scrollFrame = CreateFrame("ScrollFrame", "PhantomLockoutPopupScroll", f)
-    f.scrollFrame:SetPoint("TOPLEFT",  f.colName,   "BOTTOMLEFT",  -2,  -4)
-    f.scrollFrame:SetPoint("TOPRIGHT", f.colStatus, "BOTTOMRIGHT",  2,  -4)
-    f.scrollFrame:EnableMouse(true)
-    f.scrollFrame:EnableMouseWheel(true)
-    f.scrollFrame:SetScript("OnEnter", function() popupHidePending = false end)
-    f.scrollFrame:SetScript("OnLeave", function() SchedulePopupHide() end)
-    f.scrollFrame:SetScript("OnMouseWheel", function()
-        local delta = arg1  -- +1 up, -1 down
-        local current = f.scrollFrame:GetVerticalScroll()
-        local max     = f.scrollFrame:GetVerticalScrollRange()
-        local newVal  = current - delta * MEMBER_ROW_H * 2
-        if newVal < 0   then newVal = 0   end
-        if newVal > max then newVal = max end
-        f.scrollFrame:SetVerticalScroll(newVal)
-    end)
+    -- Separator 3 (under col headers)
+    local sep3 = f:CreateTexture(nil, "ARTWORK")
+    sep3:SetTexture(1, 1, 1, 0.06)
+    sep3:SetHeight(1)
+    sep3:SetPoint("TOPLEFT",  f, "TOPLEFT",  10, -(POPUP_HEADER_H - 4))
+    sep3:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -(POPUP_HEADER_H - 4))
 
-    -- Scroll child
-    f.scrollChild = CreateFrame("Frame", nil, f.scrollFrame)
-    f.scrollChild:SetWidth(1)   -- width driven by scroll frame
-    f.scrollChild:SetHeight(1)  -- updated dynamically
-    f.scrollFrame:SetScrollChild(f.scrollChild)
+    -- Pre-create row pool as real Frame children of the popup
+    -- These stay parented to f and are absolutely positioned each refresh
+    for i = 1, MAX_POOL do
+        local row = CreateFrame("Frame", nil, f)
+        row:SetWidth(POPUP_W - POPUP_PAD * 2)
+        row:SetHeight(MEMBER_ROW_H)
 
-    -- Hint line at bottom
-    f.hintText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    f.hintText:SetPoint("BOTTOMLEFT",  f, "BOTTOMLEFT",  12, 10)
-    f.hintText:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, 10)
-    f.hintText:SetJustifyH("CENTER")
-    f.hintText:SetText("|cff555555Left-click: details  |  Right-click: invite available|r")
+        local nameFS = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        nameFS:SetPoint("LEFT", row, "LEFT", 0, 0)
+        nameFS:SetWidth(POPUP_NAME_W)
+        nameFS:SetJustifyH("LEFT")
+        nameFS:SetHeight(MEMBER_ROW_H)
+
+        local timerFS = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        timerFS:SetPoint("LEFT", row, "LEFT", POPUP_NAME_W, 0)
+        timerFS:SetWidth(POPUP_TIMER_W)
+        timerFS:SetJustifyH("RIGHT")
+        timerFS:SetHeight(MEMBER_ROW_H)
+
+        row:Hide()
+        rowPool[i] = { frame = row, nameFS = nameFS, timerFS = timerFS }
+    end
+
+    -- Scroll hint
+    f.scrollHint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    f.scrollHint:SetPoint("BOTTOMLEFT",  f, "BOTTOMLEFT",  POPUP_PAD, 10)
+    f.scrollHint:SetWidth(POPUP_W - POPUP_PAD * 2)
+    f.scrollHint:SetJustifyH("CENTER")
+    f.scrollHint:SetText("|cff555555Scroll to see more  |  R-click to invite available|r")
 
     f:Hide()
     return f
 end
 
--- Populate and show the popup anchored to the given row frame
+-- The member data table, rebuilt each ShowRaidPopup call, read by RefreshPopupRows
+local popupMembers = {}
+
+function RefreshPopupRows()
+    if not raidPopup then return end
+
+    local total   = table.getn(popupMembers)
+    local visible = POPUP_VISIBLE_ROWS
+    if visible > total then visible = total end
+
+    -- Hide all rows first
+    for i = 1, MAX_POOL do
+        rowPool[i].frame:Hide()
+    end
+
+    -- Position and fill visible rows
+    for slot = 1, visible do
+        local dataIdx = popupScrollOffset + slot
+        if dataIdx > total then break end
+        local m   = popupMembers[dataIdx]
+        local r   = rowPool[slot]
+        local yOff = -(POPUP_HEADER_H + (slot - 1) * MEMBER_ROW_H)
+
+        r.frame:ClearAllPoints()
+        r.frame:SetPoint("TOPLEFT", raidPopup, "TOPLEFT", POPUP_PAD, yOff)
+        r.frame:Show()
+
+        if m.isLocked == nil then
+            r.nameFS:SetText("|cff888888" .. m.name .. "|r")
+            r.timerFS:SetText("")
+        elseif m.isLocked then
+            local rem = GetGuildMemberLockoutRemaining(popupRaid, m.name)
+            r.nameFS:SetText("|cffff7744" .. m.name .. "|r")
+            r.timerFS:SetText("|cffff8833" .. (rem and FormatCountdown(rem) or "LOCKED") .. "|r")
+        else
+            r.nameFS:SetText("|cff55dd55" .. m.name .. "|r")
+            r.timerFS:SetText("|cff448844available|r")
+        end
+    end
+
+    -- Scroll hint visibility
+    if total > POPUP_VISIBLE_ROWS then
+        local maxOff = total - POPUP_VISIBLE_ROWS
+        raidPopup.scrollHint:SetText(string.format(
+            "|cff888888Scroll (%d/%d)  |  R-click to invite available|r",
+            popupScrollOffset + 1, total))
+    else
+        raidPopup.scrollHint:SetText("|cff555555R-click to invite available|r")
+    end
+end
+
 function ShowRaidPopup(anchorFrame, raid)
     popupHidePending = false
     popupRaid   = raid
@@ -1007,108 +1069,59 @@ function ShowRaidPopup(anchorFrame, raid)
         raidPopup = BuildRaidPopup()
     end
 
-    local myName   = UnitName("player")
-    local pLocked, pTime = IsPlayerLocked(raid)
+    local myName    = UnitName("player")
+    local pLocked   = IsPlayerLocked(raid)
     local remaining = GetDisplayCountdown(raid)
 
-    -- Title
-    raidPopup.titleText:SetText(
-        string.format("|cffffd100%s|r  |cff888888(%d-Man, %s)|r",
-            raid.name, raid.size, GetCycleLabel(raid.cycle)))
+    raidPopup.titleText:SetText(string.format(
+        "|cffffd100%s|r  |cff888888(%d-Man, %s)|r",
+        raid.name, raid.size, GetCycleLabel(raid.cycle)))
 
-    -- Your status
     if pLocked then
-        raidPopup.myStatusText:SetText(
-            string.format("|cffff4444You:|r LOCKED  |cff888888expires|r |cffff8833%s|r",
-                FormatCountdown(remaining)))
+        raidPopup.myStatusText:SetText(string.format(
+            "|cffff4444You:|r LOCKED  |cff888888expires|r |cffff8833%s|r",
+            FormatCountdown(remaining)))
     else
-        raidPopup.myStatusText:SetText(
-            string.format("|cff44ff44You:|r AVAILABLE  |cff888888next reset|r |cffaaaaaa%s|r",
-                FormatCountdown(remaining)))
+        raidPopup.myStatusText:SetText(string.format(
+            "|cff44ff44You:|r AVAILABLE  |cff888888resets|r |cffaaaaaa%s|r",
+            FormatCountdown(remaining)))
     end
 
-    -- Build sorted member list: locked first (orange), then available (green)
-    local locked   = GetGuildLockedNames(raid)   -- sorted already
-    local allUsers = {}
-    for name, _ in pairs(addonUsers) do
-        if name ~= myName then
-            table.insert(allUsers, name)
-        end
-    end
-    table.sort(allUsers)
+    -- Rebuild member data
+    local gLocked  = GetGuildLockedNames(raid)
+    local lockedSet = {}
+    for i = 1, table.getn(gLocked) do lockedSet[gLocked[i]] = true end
 
     local available = {}
-    local lockedSet = {}
-    for i = 1, table.getn(locked) do lockedSet[locked[i]] = true end
-    for i = 1, table.getn(allUsers) do
-        if not lockedSet[allUsers[i]] then
-            table.insert(available, allUsers[i])
+    for name, _ in pairs(addonUsers) do
+        if name ~= myName and not lockedSet[name] then
+            table.insert(available, name)
         end
     end
+    table.sort(available)
 
-    -- Combined list: locked first, then available
-    local members = {}
-    for i = 1, table.getn(locked)    do table.insert(members, { name = locked[i],    isLocked = true  }) end
-    for i = 1, table.getn(available) do table.insert(members, { name = available[i],  isLocked = false }) end
+    popupMembers = {}
+    for i = 1, table.getn(gLocked)   do table.insert(popupMembers, { name = gLocked[i],   isLocked = true  }) end
+    for i = 1, table.getn(available) do table.insert(popupMembers, { name = available[i],  isLocked = false }) end
 
-    local totalMembers = table.getn(members)
+    if table.getn(popupMembers) == 0 then
+        popupMembers = { { name = "No addon users seen yet.", isLocked = nil } }
+    end
 
-    -- Resize scroll frame height to fit up to POPUP_VISIBLE_ROWS
-    local visRows    = totalMembers
+    popupTotalRows    = table.getn(popupMembers)
+    popupScrollOffset = 0
+
+    -- Resize frame height
+    local visRows = popupTotalRows
     if visRows > POPUP_VISIBLE_ROWS then visRows = POPUP_VISIBLE_ROWS end
-    if visRows < 1 then visRows = 1 end
-    local scrollH = visRows * MEMBER_ROW_H
-    raidPopup.scrollFrame:SetHeight(scrollH)
-    raidPopup.scrollFrame:SetVerticalScroll(0)
+    raidPopup:SetHeight(POPUP_HEADER_H + visRows * MEMBER_ROW_H + POPUP_FOOTER_H)
 
-    -- Total scroll child height
-    raidPopup.scrollChild:SetHeight(totalMembers * MEMBER_ROW_H)
-    raidPopup.scrollChild:SetWidth(raidPopup.scrollFrame:GetWidth())
+    RefreshPopupRows()
 
-    -- Populate member rows
-    for i = 1, totalMembers do
-        local m   = members[i]
-        local mrow = GetOrCreateMemberRow(raidPopup.scrollChild, i)
-        mrow.nameFS:SetPoint("TOPLEFT", raidPopup.scrollChild, "TOPLEFT", 2, -((i-1) * MEMBER_ROW_H))
-        mrow.timerFS:SetPoint("TOPRIGHT", raidPopup.scrollChild, "TOPRIGHT", -2, -((i-1) * MEMBER_ROW_H))
-        if m.isLocked then
-            local rem = GetGuildMemberLockoutRemaining(raid, m.name)
-            mrow.nameFS:SetText("|cffff7744" .. m.name .. "|r")
-            mrow.timerFS:SetText("|cffff8833" .. (rem and FormatCountdown(rem) or "LOCKED") .. "|r")
-        else
-            mrow.nameFS:SetText("|cff44ff44" .. m.name .. "|r")
-            mrow.timerFS:SetText("|cff448844available|r")
-        end
-        mrow.nameFS:Show()
-        mrow.timerFS:Show()
-    end
-
-    -- Hide unused pool rows
-    for i = totalMembers + 1, table.getn(memberRowPool) do
-        memberRowPool[i].nameFS:Hide()
-        memberRowPool[i].timerFS:Hide()
-    end
-
-    -- Empty state
-    if totalMembers == 0 then
-        local mrow = GetOrCreateMemberRow(raidPopup.scrollChild, 1)
-        mrow.nameFS:SetPoint("TOPLEFT", raidPopup.scrollChild, "TOPLEFT", 2, 0)
-        mrow.nameFS:SetText("|cff555555No addon users seen yet.|r")
-        mrow.timerFS:SetText("")
-        mrow.nameFS:Show()
-        mrow.timerFS:Show()
-    end
-
-    -- Total popup height: title + sep + mystatus + sep2 + colheader + scrollH + hint
-    local totalH = 12 + 16 + 8 + 1 + 16 + 5 + 1 + 16 + 8 + scrollH + 8 + 16 + 10
-    raidPopup:SetHeight(totalH)
-
-    -- Anchor: right of the hovered row, clamped to screen
     raidPopup:ClearAllPoints()
     raidPopup:SetPoint("LEFT", anchorFrame, "RIGHT", 6, 0)
-
-    raidPopup:Show()
     raidPopup:SetFrameLevel(anchorFrame:GetFrameLevel() + 20)
+    raidPopup:Show()
 end
 
 -- Schedule hiding the popup after a short delay (so mousing into the popup itself cancels it)
@@ -1134,7 +1147,7 @@ local function TickRaidPopup(elapsed)
         popupTickElapsed = popupTickElapsed + elapsed
         if popupTickElapsed >= 1 then
             popupTickElapsed = 0
-            ShowRaidPopup(popupAnchor, popupRaid)   -- repopulate in-place
+            RefreshPopupRows()
         end
     end
 end
