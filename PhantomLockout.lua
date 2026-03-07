@@ -93,6 +93,7 @@ local RAIDS = {
     {
         name = "Karazhan",
         short = "Kara40",
+        aliases = { "Lower Karazhan", "Upper Karazhan", "Karazhan - Lower", "Karazhan - Upper" },
         size = 40,
         cycle = CYCLE_5DAY,
         anchor = ANCHOR_KARAZHAN,
@@ -103,6 +104,7 @@ local RAIDS = {
     {
         name = "Karazhan (10)",
         short = "Kara10",
+        aliases = { "Lower Karazhan", "Upper Karazhan", "Karazhan - Lower", "Karazhan - Upper" },
         size = 10,
         cycle = CYCLE_3DAY,
         anchor = ANCHOR_RAID20,
@@ -881,7 +883,7 @@ end
 -- RAID MEMBER POPUP (scrollable, replaces GameTooltip)
 ----------------------------------------------------------------------
 
-local POPUP_W            = 290
+local POPUP_W            = 340
 local POPUP_PAD          = 12
 local POPUP_VISIBLE_ROWS = 12
 local MEMBER_ROW_H       = 14
@@ -894,7 +896,12 @@ local popupTotalRows    = 0
 local popupHideTimer    = 0
 local popupHidePending  = false
 local POPUP_HIDE_DELAY  = 0.25
-local popupMembers      = {}   -- { name, isLocked }
+local popupMembers   = {}   -- { name, isLocked }
+local popupGuildName = ""   -- cached guild name shown next to each member
+
+local function RefreshPopupGuildName()
+    popupGuildName = GetGuildInfo("player") or ""
+end
 
 local function RebuildPopupText()
     if not raidPopup then return end
@@ -907,14 +914,15 @@ local function RebuildPopupText()
         local idx = popupScrollOffset + slot
         if idx > total then break end
         local m = popupMembers[idx]
+        local guildTag = (popupGuildName ~= "") and ("|cff888888<" .. popupGuildName .. ">|r  ") or ""
         if m.isLocked == nil then
             table.insert(lines, "|cff888888" .. m.name .. "|r")
         elseif m.isLocked then
             local rem = GetGuildMemberLockoutRemaining(popupRaid, m.name)
             local timerStr = rem and FormatCountdown(rem) or "LOCKED"
-            table.insert(lines, "|cffff7744" .. m.name .. "|r  |cff888888-|r  |cffff8833" .. timerStr .. "|r")
+            table.insert(lines, "|cffff7744" .. m.name .. "|r  " .. guildTag .. "|cffff8833" .. timerStr .. "|r")
         else
-            table.insert(lines, "|cff55dd55" .. m.name .. "|r  |cff448844(available)|r")
+            table.insert(lines, "|cff55dd55" .. m.name .. "|r  " .. guildTag .. "|cff448844available|r")
         end
     end
 
@@ -1026,6 +1034,8 @@ function ShowRaidPopup(anchorFrame, raid)
     if not raidPopup then
         raidPopup = BuildRaidPopup()
     end
+
+    RefreshPopupGuildName()
 
     local myName    = UnitName("player")
     local pLocked   = IsPlayerLocked(raid)
