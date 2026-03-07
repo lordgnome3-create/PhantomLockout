@@ -93,7 +93,7 @@ local RAIDS = {
     {
         name = "Karazhan",
         short = "Kara40",
-        aliases = { "Lower Karazhan", "Upper Karazhan", "Karazhan - Lower", "Karazhan - Upper" },
+        aliases = { "Karazhan - Lower", "Karazhan - Upper" },
         size = 40,
         cycle = CYCLE_5DAY,
         anchor = ANCHOR_KARAZHAN,
@@ -104,7 +104,7 @@ local RAIDS = {
     {
         name = "Karazhan (10)",
         short = "Kara10",
-        aliases = { "Lower Karazhan", "Upper Karazhan", "Karazhan - Lower", "Karazhan - Upper" },
+        aliases = { "Lower Karazhan", "Upper Karazhan", "Karazhan - Lower", "Karazhan - Upper", "Karazhan (10-player)" },
         size = 10,
         cycle = CYCLE_3DAY,
         anchor = ANCHOR_RAID20,
@@ -349,21 +349,21 @@ local function FindLockoutEntry(nameKey, raidCycle)
     if not entries then return nil end
     local now = time()
 
-    -- For 5-day vs 3-day cycles, ALWAYS use remaining-time discrimination.
-    -- A 3-day lockout can hold at most CYCLE_3DAY seconds; a 5-day lockout will
-    -- exceed that.  This correctly handles both the single-entry and multi-entry cases.
+    -- For 5-day vs 3-day cycles, discriminate by remaining time.
+    -- A 3-day lockout should never exceed CYCLE_3DAY, but we allow a 2-hour grace
+    -- buffer for server-side rounding or clock drift.
     if raidCycle == CYCLE_5DAY or raidCycle == CYCLE_3DAY then
+        local GRACE = 7200  -- 2 hours
         for i = 1, table.getn(entries) do
             local e = entries[i]
             if e.expiry > now then
-                if raidCycle == CYCLE_5DAY and e.remaining > CYCLE_3DAY then
-                    return e   -- only a 5-day lock can have > 3 days left
-                elseif raidCycle == CYCLE_3DAY and e.remaining <= CYCLE_3DAY then
-                    return e   -- fits within a 3-day window
+                if raidCycle == CYCLE_5DAY and e.remaining > CYCLE_3DAY + GRACE then
+                    return e   -- clearly a 5-day lockout
+                elseif raidCycle == CYCLE_3DAY and e.remaining <= CYCLE_3DAY + GRACE then
+                    return e   -- fits within a 3-day window (with grace)
                 end
             end
         end
-        -- No discriminated match — do NOT fall back to avoid cross-contamination.
         return nil
     end
 
