@@ -2,7 +2,7 @@
 ## Title: |cff8800ffPhantom|r|cffcc44ffLockout|r
 ## Notes: Tracks Turtle WoW raid lockout timers with an Auction House-style UI.
 ## Author: PhantomDev
-## Version: 1.0.1
+## Version: 1.2.1
 ## SavedVariables: PhantomLockoutDB
 PhantomLockout.xml
 PhantomLockout.lua
